@@ -1,0 +1,200 @@
+<?xml version="1.0" encoding="utf-8"?>
+<androidx.constraintlayout.widget.ConstraintLayout xmlns:android="http://schemas.android.com/apk/res/android"
+    xmlns:app="http://schemas.android.com/apk/res-auto"
+    xmlns:tools="http://schemas.android.com/tools"
+    android:layout_width="match_parent"
+    android:layout_height="match_parent"
+    tools:context=".MainActivity">
+
+    <TextureView
+        android:id="@+id/textureView"
+        android:layout_width="0dp"
+        android:layout_height="0dp"
+        app:layout_constraintBottom_toBottomOf="parent"
+        app:layout_constraintEnd_toEndOf="parent"
+        app:layout_constraintHorizontal_bias="0.0"
+        app:layout_constraintStart_toStartOf="parent"
+        app:layout_constraintTop_toTopOf="parent"
+        app:layout_constraintVertical_bias="1.0" />
+
+    <com.example.rawcamdemo.CustomView
+        android:id="@+id/surfaceView"
+        android:layout_width="match_parent"
+        android:layout_height="match_parent"
+        android:background="@null"
+        app:layout_constraintBottom_toBottomOf="@+id/textureView"
+        app:layout_constraintEnd_toEndOf="@+id/textureView"
+        app:layout_constraintStart_toStartOf="@+id/textureView"
+        app:layout_constraintTop_toTopOf="@+id/textureView" />
+
+    <ImageButton
+        android:id="@+id/photoButton"
+        android:layout_width="75dp"
+        android:layout_height="75dp"
+        android:layout_marginBottom="64dp"
+        android:contentDescription="@string/video_button"
+        android:scaleType="fitXY"
+        app:layout_constraintBottom_toBottomOf="parent"
+        app:layout_constraintEnd_toStartOf="@+id/videoButton"
+        app:srcCompat="@mipmap/btn_photo_foreground" />
+
+    <ImageButton
+        android:id="@+id/videoButton"
+        android:layout_width="75dp"
+        android:layout_height="75dp"
+        android:layout_marginBottom="64dp"
+        app:srcCompat="@mipmap/btn_video_foreground"
+        android:scaleType="fitXY"
+        android:contentDescription="@string/photo_button"
+        app:layout_constraintBottom_toBottomOf="parent"
+        app:layout_constraintEnd_toStartOf="@+id/soundButton" />
+
+    <ImageButton
+        android:id="@+id/soundButton"
+        android:layout_width="75dp"
+        android:layout_height="75dp"
+        android:layout_marginEnd="16dp"
+        android:layout_marginBottom="64dp"
+        app:srcCompat="@mipmap/btn_sound_on_foreground"
+        android:scaleType="center"
+        android:contentDescription="@string/sound_button"
+        app:layout_constraintBottom_toBottomOf="parent"
+        app:layout_constraintEnd_toEndOf="parent" />
+
+    <Chronometer
+        android:id="@+id/counter"
+        android:layout_width="150dp"
+        android:layout_height="33dp"
+        android:layout_marginEnd="16dp"
+        android:textColor="#FF0000"
+        android:textSize="20sp"
+        android:visibility="invisible"
+        app:layout_constraintEnd_toEndOf="parent"
+        app:layout_constraintTop_toBottomOf="@+id/videoButton" />
+
+    <Spinner
+        android:id="@+id/camSpinner"
+        android:layout_width="70dp"
+        android:layout_height="33dp"
+        android:layout_marginStart="4dp"
+        android:layout_marginTop="60dp"
+        android:textSize="12sp"
+        app:layout_constraintStart_toStartOf="parent"
+        app:layout_constraintTop_toTopOf="parent" />
+
+    <Spinner
+        android:id="@+id/imResSpinner"
+        android:layout_width="133dp"
+        android:layout_height="33dp"
+        android:layout_marginStart="4dp"
+        android:layout_marginTop="60dp"
+        android:textSize="12sp"
+        app:layout_constraintStart_toEndOf="@+id/imFormatSpinner"
+        app:layout_constraintTop_toTopOf="parent" />
+
+    <Spinner
+        android:id="@+id/vidResSpinner"
+        android:layout_width="133dp"
+        android:layout_height="33dp"
+        android:layout_marginStart="182dp"
+        android:layout_marginTop="16dp"
+        android:textSize="12sp"
+        app:layout_constraintStart_toStartOf="parent"
+        app:layout_constraintTop_toBottomOf="@+id/imResSpinner" />
+
+    <Spinner
+        android:id="@+id/imFormatSpinner"
+        android:layout_width="100dp"
+        android:layout_height="33dp"
+        android:layout_marginStart="4dp"
+        android:layout_marginTop="60dp"
+        app:layout_constraintStart_toEndOf="@+id/camSpinner"
+        app:layout_constraintTop_toTopOf="parent" />
+
+    <Spinner
+        android:id="@+id/jpgQualitySpinner"
+        android:layout_width="80dp"
+        android:layout_height="33dp"
+        android:layout_marginStart="4dp"
+        android:layout_marginTop="60dp"
+        app:layout_constraintStart_toEndOf="@+id/imResSpinner"
+        app:layout_constraintTop_toTopOf="parent" />
+
+    <androidx.appcompat.widget.SwitchCompat
+        android:id="@+id/manualSwitch"
+        android:layout_width="105dp"
+        android:layout_height="30dp"
+        android:layout_marginStart="16dp"
+        android:layout_marginBottom="12dp"
+        android:text="Manual"
+        app:layout_constraintBottom_toTopOf="@+id/uiSwitch"
+        app:layout_constraintStart_toStartOf="parent" />
+
+    <com.google.android.material.slider.Slider
+        android:id="@+id/focusSlider"
+        android:layout_width="match_parent"
+        android:layout_height="wrap_content"
+        android:layout_marginStart="32dp"
+        android:layout_marginEnd="32dp"
+        app:layout_constraintBottom_toTopOf="@+id/exposureSlider"
+        app:layout_constraintEnd_toEndOf="parent"
+        app:layout_constraintHorizontal_bias="0.0"
+        app:layout_constraintStart_toStartOf="parent" />
+
+    <com.google.android.material.slider.Slider
+        android:id="@+id/zoomSlider"
+        android:layout_width="match_parent"
+        android:layout_height="wrap_content"
+        android:layout_marginStart="32dp"
+        android:layout_marginEnd="32dp"
+        android:layout_marginBottom="12dp"
+        app:layout_constraintBottom_toTopOf="@+id/photoButton"
+        app:layout_constraintEnd_toEndOf="parent"
+        app:layout_constraintStart_toStartOf="@+id/textureView" />
+
+    <com.google.android.material.slider.Slider
+        android:id="@+id/exposureSlider"
+        android:layout_width="match_parent"
+        android:layout_height="wrap_content"
+        android:layout_marginStart="32dp"
+        android:layout_marginEnd="32dp"
+        app:layout_constraintBottom_toTopOf="@+id/zoomSlider"
+        app:layout_constraintEnd_toEndOf="@+id/textureView"
+        app:layout_constraintHorizontal_bias="0.0"
+        app:layout_constraintStart_toStartOf="@+id/textureView" />
+
+    <TextView
+        android:id="@+id/labelZoom"
+        android:layout_width="wrap_content"
+        android:layout_height="wrap_content"
+        android:text="Zoom"
+        app:layout_constraintStart_toStartOf="@+id/zoomSlider"
+        app:layout_constraintTop_toTopOf="@+id/zoomSlider" />
+
+    <TextView
+        android:id="@+id/labelFocus"
+        android:layout_width="wrap_content"
+        android:layout_height="wrap_content"
+        android:text="Focus"
+        app:layout_constraintStart_toStartOf="@+id/focusSlider"
+        app:layout_constraintTop_toTopOf="@+id/focusSlider" />
+
+    <TextView
+        android:id="@+id/labelExposure"
+        android:layout_width="wrap_content"
+        android:layout_height="wrap_content"
+        android:text="Exposure"
+        app:layout_constraintStart_toStartOf="@+id/exposureSlider"
+        app:layout_constraintTop_toTopOf="@+id/exposureSlider" />
+
+    <androidx.appcompat.widget.SwitchCompat
+        android:id="@+id/uiSwitch"
+        android:layout_width="105dp"
+        android:layout_height="30dp"
+        android:layout_marginStart="16dp"
+        android:layout_marginBottom="64dp"
+        android:text="UI"
+        app:layout_constraintBottom_toBottomOf="@+id/textureView"
+        app:layout_constraintStart_toStartOf="parent" />
+
+</androidx.constraintlayout.widget.ConstraintLayout>
