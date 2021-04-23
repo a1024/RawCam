@@ -120,6 +120,15 @@
         app:layout_constraintStart_toEndOf="@+id/imResSpinner"
         app:layout_constraintTop_toTopOf="parent" />
 
+    <Spinner
+        android:id="@+id/burstSpinner"
+        android:layout_width="80dp"
+        android:layout_height="33dp"
+        android:layout_marginStart="4dp"
+        android:layout_marginTop="60dp"
+        app:layout_constraintStart_toEndOf="@+id/vidResSpinner"
+        app:layout_constraintTop_toBottomOf="@+id/jpgQualitySpinner" />
+
     <androidx.appcompat.widget.SwitchCompat
         android:id="@+id/manualSwitch"
         android:layout_width="105dp"

@@ -4,6 +4,7 @@ import androidx.annotation.NonNull;
 import androidx.appcompat.widget.SwitchCompat;
 import androidx.core.app.ActivityCompat;
 import androidx.fragment.app.Fragment;
+import androidx.fragment.app.FragmentActivity;
 
 import android.Manifest;
 import android.content.Context;
@@ -11,6 +12,7 @@ import android.content.pm.PackageManager;
 import android.graphics.Bitmap;
 import android.graphics.ImageFormat;
 import android.graphics.Matrix;
+import android.graphics.PixelFormat;
 import android.graphics.SurfaceTexture;
 import android.hardware.camera2.CameraAccessException;
 import android.hardware.camera2.CameraCaptureSession;
@@ -18,9 +20,9 @@ import android.hardware.camera2.CameraCharacteristics;
 import android.hardware.camera2.CameraDevice;
 import android.hardware.camera2.CameraManager;
 import android.hardware.camera2.CameraMetadata;
+import android.hardware.camera2.CaptureFailure;
 import android.hardware.camera2.CaptureRequest;
 import android.hardware.camera2.CaptureResult;
-import android.hardware.camera2.DngCreator;
 import android.hardware.camera2.TotalCaptureResult;
 import android.hardware.camera2.params.StreamConfigurationMap;
 import android.media.Image;
@@ -37,6 +39,7 @@ import android.util.Log;
 import android.util.Range;
 import android.util.Rational;
 import android.util.Size;
+import android.util.SparseIntArray;
 import android.view.LayoutInflater;
 import android.view.MotionEvent;
 import android.view.Surface;
@@ -51,7 +54,6 @@ import android.widget.Spinner;
 import android.widget.TextView;
 import android.widget.Toast;
 
-import com.google.android.material.slider.LabelFormatter;
 import com.google.android.material.slider.Slider;
 
 import java.io.File;
@@ -62,13 +64,25 @@ import java.text.SimpleDateFormat;
 import java.util.ArrayList;
 import java.util.Arrays;
 import java.util.Date;
+import java.util.List;
 import java.util.Locale;
+import java.util.Set;
 
 public class CameraFragment extends Fragment//https://www.youtube.com/playlist?list=PL9jCwTXYWjDIHNEGtsRdCTk79I9-95TbJ
 {
 	static final boolean DEBUG=true, DEBUG_SPINNERS=false;
 	static final String TAG="RawCamDemo";
 	static void loge(String str){Log.e(TAG, str);}
+
+
+	static
+	{
+		System.loadLibrary("archiver");
+	}
+	public native byte[] compress(byte[] data, int width, int height, int depth, int bayer);
+	public native byte[] pack_raw(byte[] data, int width, int height, int depth, int bayer);
+	public native byte[] pack_r10g12(byte[] data, int width, int height);
+	public native byte[] pack_r12g14(byte[] data, int width, int height);
 
 
 	static final int CAMERA_REQUEST=0, STORAGE_REQUEST=1;
@@ -107,6 +121,29 @@ public class CameraFragment extends Fragment//https://www.youtube.com/playlist?l
 			return idx;
 		return 0;
 	}
+/*	static byte[] YUV_420_888toNV21(Image image)
+	{
+		byte[] nv21;
+		ByteBuffer yBuffer = image.getPlanes()[0].getBuffer();
+		ByteBuffer vuBuffer = image.getPlanes()[2].getBuffer();
+
+		int ySize = yBuffer.remaining();
+		int vuSize = vuBuffer.remaining();
+
+		nv21 = new byte[ySize + vuSize];
+
+		yBuffer.get(nv21, 0, ySize);
+		vuBuffer.get(nv21, ySize, vuSize);
+
+		return nv21;
+	}
+	static byte[] NV21toJPEG(byte[] nv21, int width, int height)
+	{
+		ByteArrayOutputStream out = new ByteArrayOutputStream();
+		YuvImage yuv = new YuvImage(nv21, ImageFormat.NV21, width, height, null);
+		yuv.compressToJpeg(new Rect(0, 0, width, height), 100, out);
+		return out.toByteArray();
+	}//*/
 
 
 	void displayRealToast(boolean stay, String str)
@@ -117,6 +154,21 @@ public class CameraFragment extends Fragment//https://www.youtube.com/playlist?l
 	{
 		surfaceView.setStatus(stay?7000:4000, str);
 		//Toast.makeText(getActivity(), str, stay?Toast.LENGTH_LONG:Toast.LENGTH_SHORT).show();
+	}
+	void saveError(int line, Exception e)//for imageSaver2
+	{
+		String msg="Error imageSaver2 line "+line+": "+e.getMessage();//
+		if(DEBUG)
+			displayToast(true, msg);
+		loge(msg);
+		e.printStackTrace();
+	}
+	void saveError(int line, String str)
+	{
+		String msg="Error imageSaver2 line "+line+": "+str;
+		if(DEBUG)
+			displayToast(true, msg);
+		loge(msg);
 	}
 	void error(int line, Exception e)
 	{
@@ -133,6 +185,8 @@ public class CameraFragment extends Fragment//https://www.youtube.com/playlist?l
 			displayToast(true, msg);
 		loge(msg);
 	}
+
+	//Context context;
 	int screenWidth, screenHeight;
 	int textureWidth, textureHeight;
 	//OrientationEventListener orientationListener;
@@ -143,12 +197,10 @@ public class CameraFragment extends Fragment//https://www.youtube.com/playlist?l
 			//displayToast(false, "TextureView is available");
 			textureWidth=width;
 			textureHeight=height;
-			setupCamera(false);
+			setupCamera(false, false);
 			connectCamera();
 		}
-		@Override public void onSurfaceTextureSizeChanged(@NonNull SurfaceTexture surface, int width, int height)
-		{
-		}
+		@Override public void onSurfaceTextureSizeChanged(@NonNull SurfaceTexture surface, int width, int height){}
 		@Override public boolean onSurfaceTextureDestroyed(@NonNull SurfaceTexture surface)
 		{
 			return false;
@@ -203,83 +255,81 @@ public class CameraFragment extends Fragment//https://www.youtube.com/playlist?l
 
 	boolean waitingForLock=false;
 	ImageReader imageReader;
+	ImageSaver2 imageSaver2=new ImageSaver2();
+	final Object mutex=new Object();
 	class ImageSaver implements Runnable
 	{
-		final Image image;
-		ImageSaver(Image _image){image=_image;}
+		ImageReader reader;
+		ImageSaver(ImageReader _reader){reader=_reader;}
+	//	final Image image;
+	//	ImageSaver(Image _image){image=_image;}
 		void printSuccess(){displayToast(false, "Saved "+filename);}
 		void printFailure(){displayToast(true, "Failed to save "+filename);}
 		@Override public void run()
 		{
-			int format=image.getFormat();
-			switch(format)
+			synchronized(mutex)
 			{
-			case ImageFormat.JPEG:
-				ByteBuffer buffer=image.getPlanes()[0].getBuffer();
-				byte[] bytes=new byte[buffer.remaining()];
-				buffer.get(bytes);
-				FileOutputStream stream=null;
-				try
+				Image image=reader.acquireLatestImage();
+				int format=image.getFormat();
+				ByteBuffer buffer;
+				String result=null;
+				switch(format)
 				{
-					stream=new FileOutputStream(filename);
-					stream.write(bytes);
-					printSuccess();
-				}
-				catch(IOException e)
-				{
-					error(201, e);
-					printFailure();
-				}
-				finally
-				{
-					image.close();
-					if(stream!=null)
+				case ImageFormat.JPEG:
+					buffer=image.getPlanes()[0].getBuffer();
+					byte[] bytes=new byte[buffer.remaining()];
+					buffer.get(bytes);
+
+					result=imageSaver2.saveBinary(filename, bytes);
+					if(result!=null)
+						surfaceView.setStatus(2000, "Saved "+result);
+					else
+						surfaceView.setStatus(4000, "Failed to save "+ImageSaver2.getName(filename));
+					break;
+				case ImageFormat.RAW_SENSOR:
+					result=imageSaver2.saveDng(filename, image, captureResult, characteristics);
+					if(result!=null)
+						surfaceView.setStatus(2000, "Saved "+result);
+					else
+						surfaceView.setStatus(4000, "Failed to save "+ImageSaver2.getName(filename));
+					break;
+				case ImageFormat.RAW10://TODO: query Bayer mosaic info
+				case ImageFormat.RAW12:
 					{
-						try
+						int bayer='G'|'R'<<8|'B'<<16|'G'<<24;
+						int iw=image.getWidth(), ih=image.getHeight(), size=iw*ih;
+						Image.Plane[] planes=image.getPlanes();
+						buffer=planes[0].getBuffer();//TODO: get bytes & unpack in native code
+
+						int depth=format==ImageFormat.RAW10?10:12;
+						byte[] bits=new byte[buffer.remaining()];
+						buffer.get(bits);
+						byte[] data=null;
+						switch(selectedImFormat)
 						{
-							stream.close();
+						case FORMAT_RAW_HUFF:
+							data=compress(bits, iw, ih, depth, bayer);
+							break;
+						case FORMAT_RAW_UNC:
+							data=pack_raw(bits, iw, ih, depth, bayer);
+							break;
+						case FORMAT_GRAY_UNC:
+							if(supportsRaw12)
+								data=pack_r12g14(bits, iw, ih);
+							else
+								data=pack_r10g12(bits, iw, ih);
+							break;
 						}
-						catch(IOException e)
-						{
-							error(215, e);
-						}
+						if(data!=null)
+							result=imageSaver2.saveBinary(filename, data);
+						if(result!=null)
+							surfaceView.setStatus(2000, "Saved "+result);
+						else
+							surfaceView.setStatus(2000, "Failed to save "+ImageSaver2.getName(filename));
 					}
+					break;
 				}
-				break;
-			case ImageFormat.FLEX_RGB_888://TODO: save as PNG
-				break;
-			case ImageFormat.RAW_SENSOR:
-				//if(rawSavePreview)
-				//	return;
-				DngCreator dngCreator=new DngCreator(characteristics, captureResult);
-				FileOutputStream rawStream=null;
-				try
-				{
-					rawStream=new FileOutputStream(filename);
-					dngCreator.writeImage(rawStream, image);
-					printSuccess();
-				}
-				catch(IOException e)
-				{
-					error(231, e);
-					printFailure();
-				}
-				finally
-				{
-					image.close();
-					if(rawStream!=null)
-					{
-						try
-						{
-							rawStream.close();
-						}
-						catch(IOException e)
-						{
-							error(245, e);
-						}
-					}
-				}
-				break;
+				image.close();
 			}
 		}
 	}
@@ -348,6 +398,33 @@ public class CameraFragment extends Fragment//https://www.youtube.com/playlist?l
 			}
 		}
 	};
+	CameraCaptureSession.CaptureCallback burstCaptureCallback=new CameraCaptureSession.CaptureCallback()
+	{
+		@Override public void onCaptureStarted(@NonNull CameraCaptureSession session, @NonNull CaptureRequest request, long timestamp, long frameNumber)
+		{
+			super.onCaptureStarted(session, request, timestamp, frameNumber);
+		}
+		@Override public void onCaptureProgressed(@NonNull CameraCaptureSession session, @NonNull CaptureRequest request, @NonNull CaptureResult partialResult)
+		{
+			super.onCaptureProgressed(session, request, partialResult);
+		}
+		@Override public void onCaptureCompleted(@NonNull CameraCaptureSession session, @NonNull CaptureRequest request, @NonNull TotalCaptureResult result)
+		{
+			super.onCaptureCompleted(session, request, result);
+			--burstRemaining;
+			loge("Burst frame: "+(burstCount-burstRemaining)+"/"+burstCount);
+			createMediaFilename(MediaType.IMAGE);
+			//if(burstRemaining==0)
+		}
+		@Override public void onCaptureFailed(@NonNull CameraCaptureSession session, @NonNull CaptureRequest request, @NonNull CaptureFailure failure)
+		{
+			super.onCaptureFailed(session, request, failure);
+		}
+		@Override public void onCaptureBufferLost(@NonNull CameraCaptureSession session, @NonNull CaptureRequest request, @NonNull Surface target, long frameNumber)
+		{
+			super.onCaptureBufferLost(session, request, target, frameNumber);
+		}
+	};
 	CaptureResult captureResult;
 	CameraCharacteristics characteristics;
 	ImageButton photoButton;
@@ -372,20 +449,10 @@ public class CameraFragment extends Fragment//https://www.youtube.com/playlist?l
 			}
 		}
 		@Override public void onNothingSelected(AdapterView<?> parent){}
-	}//*/
-	//private void setSpinnerSelection(final Spinner spinner, final int selection)//https://stackoverflow.com/questions/2562248/how-to-keep-onitemselected-from-firing-off-on-a-newly-instantiated-spinner
-	//{
-	//	final AdapterView.OnItemSelectedListener listener=spinner.getOnItemSelectedListener();
-	//	spinner.setOnItemSelectedListener(null);
-	//	spinner.post(()->
-	//	{
-	//		spinner.setSelection(selection);
-	//		spinner.post(()->spinner.setOnItemSelectedListener(listener));
-	//	});
-	//}
+	}
 	TextureView textureView;
 	CustomView surfaceView;
-	Spinner camSpinner, imResSpinner, vidResSpinner, imFormatSpinner, jpgQualitySpinner;
+	Spinner camSpinner, imResSpinner, vidResSpinner, imFormatSpinner, jpgQualitySpinner, burstSpinner;
 	SwitchCompat uiSwitch, manualSwitch;
 	Slider zoomSlider, focusSlider, exposureSlider;
 	TextView labelZoom, labelFocus, labelExposure;
@@ -510,6 +577,7 @@ public class CameraFragment extends Fragment//https://www.youtube.com/playlist?l
 		//setContentView(R.layout.fragment_main);
 
 		surfaceView=view.findViewById(R.id.surfaceView);
+		surfaceView.activity=this;
 	//	surfaceHolder=surfaceView.getHolder();
 	/*	surfaceHolder.addCallback(new SurfaceHolder.Callback()
 		{
@@ -543,8 +611,10 @@ public class CameraFragment extends Fragment//https://www.youtube.com/playlist?l
 				error(400, "Failed to create folder \'DCIM/Raw\'");
 		}
 
-		DisplayMetrics displayMetrics = new DisplayMetrics();
-		getActivity().getWindowManager().getDefaultDisplay().getMetrics(displayMetrics);
+		DisplayMetrics displayMetrics=new DisplayMetrics();
+		FragmentActivity parent=getActivity();
+		assert parent!=null;
+		parent.getWindowManager().getDefaultDisplay().getMetrics(displayMetrics);
 		screenWidth=displayMetrics.widthPixels;
 		screenHeight=displayMetrics.heightPixels;
 
@@ -591,10 +661,35 @@ public class CameraFragment extends Fragment//https://www.youtube.com/playlist?l
 			}
 			else//start recording
 			{
-				if(rawSavePreview)
+				switch(selectedImFormat)
 				{
-					surfaceView.setStatus(4000, "Burst of 20 begins in 4 seconds...");
-					new Handler().postDelayed(()->savePreviewRemaining=20, 4000);
+				case FORMAT_RAW_PREVIEW_JPEG:
+					surfaceView.setStatus(4000, "Burst of "+burstCount+" begins in 4 seconds...");
+					new Handler().postDelayed(()->savePreviewRemaining=burstCount, 4000);
+					return;
+				case FORMAT_RAW_HUFF:
+				case FORMAT_RAW_UNC:
+				case FORMAT_GRAY_UNC://20210423
+					surfaceView.setStatus(4000, "Burst of "+burstCount+" begins in 4 seconds...");
+					new Handler().postDelayed(()->
+					{
+						try
+						{
+							requestBuilder.addTarget(imageReader.getSurface());
+							List<CaptureRequest> captureList=new ArrayList<>();
+							for(int k=0;k<burstCount;++k)
+								captureList.add(requestBuilder.build());
+							burstRemaining=burstCount;
+
+							previewCaptureSession.stopRepeating();
+							previewCaptureSession.captureBurst(captureList, burstCaptureCallback, null);
+							requestBuilder.removeTarget(imageReader.getSurface());
+						}
+						catch(CameraAccessException e)
+						{
+							error(650, e);
+						}
+					}, 4000);
 					return;
 				}
 				if(Build.VERSION.SDK_INT>=Build.VERSION_CODES.M&&ActivityCompat.checkSelfPermission(getActivity(), Manifest.permission.WRITE_EXTERNAL_STORAGE)!=PackageManager.PERMISSION_GRANTED)
@@ -629,7 +724,7 @@ public class CameraFragment extends Fragment//https://www.youtube.com/playlist?l
 		photoButton.setImageResource(R.mipmap.btn_photo_foreground);
 		photoButton.setOnClickListener(v->
 		{
-			if(rawSavePreview)
+			if(selectedImFormat==FORMAT_RAW_PREVIEW_JPEG)
 			{
 				savePreviewRemaining=1;
 				//savePreview();
@@ -655,6 +750,7 @@ public class CameraFragment extends Fragment//https://www.youtube.com/playlist?l
 		vidResSpinner=view.findViewById(R.id.vidResSpinner);
 		imFormatSpinner=view.findViewById(R.id.imFormatSpinner);
 		jpgQualitySpinner=view.findViewById(R.id.jpgQualitySpinner);
+		burstSpinner=view.findViewById(R.id.burstSpinner);
 		SpinnerSelectTouchListener camListener=new SpinnerSelectTouchListener()//select camera
 		{
 			@Override void itemSelected(AdapterView<?> parent, View view, int position, long id)//TODO: lazy if(selectedCam!=activeCam)...
@@ -675,7 +771,7 @@ public class CameraFragment extends Fragment//https://www.youtube.com/playlist?l
 					{
 						closeCamera();
 
-						setupCamera(true);
+						setupCamera(true, false);
 						connectCamera();
 					}
 				}
@@ -697,6 +793,14 @@ public class CameraFragment extends Fragment//https://www.youtube.com/playlist?l
 		selectedQuality=75;
 		jpgQualitySpinner.setSelection(selectedQuality/5, false);
 
+		adapter=new ArrayAdapter<>(getActivity(), R.layout.spinner_item);
+		adapter.setDropDownViewResource(android.R.layout.simple_spinner_dropdown_item);
+		for(int count: burstCounts)
+			adapter.add(Integer.toString(count));
+		burstSpinner.setAdapter(adapter);
+		burstSpinner.setSelection(0, false);
+		burstSpinner.setVisibility(View.INVISIBLE);
+
 		SpinnerSelectTouchListener imFormatListener=new SpinnerSelectTouchListener()//image format
 		{
 			//int skip=2000000;
@@ -714,21 +818,43 @@ public class CameraFragment extends Fragment//https://www.youtube.com/playlist?l
 				//	--skip;
 				//	return;
 				//}
-				switch(position)
+				selectedImFormat=imFormats.get(position);
+				if(selectedImFormat==FORMAT_JPEG)
+					manualSwitch.setVisibility(View.VISIBLE);
+				else
+					manualSwitch.setVisibility(View.INVISIBLE);
+				switch(selectedImFormat)
+				{
+				case FORMAT_JPEG://20210423
+					burstSpinner.setVisibility(View.INVISIBLE);
+					break;
+				case FORMAT_DNG:
+				case FORMAT_RAW_PREVIEW_JPEG:
+				case FORMAT_RAW_HUFF:
+				case FORMAT_RAW_UNC:
+				case FORMAT_GRAY_UNC:
+					burstSpinner.setVisibility(View.VISIBLE);
+					break;
+				}
+				//if(selectedImFormat==FORMAT_RAW_PREVIEW_JPEG)
+				//	burstSpinner.setVisibility(View.VISIBLE);
+				//else
+				//	burstSpinner.setVisibility(View.INVISIBLE);
+				surfaceView.invalidate();
+			/*	switch(position)
 				{
 				case 0://jpeg
 					selectedImFormat=ImageFormat.JPEG;
 					manualSwitch.setVisibility(View.VISIBLE);//
 					break;
-				case 1://loss-less (saved as PNG)
-					if(Build.VERSION.SDK_INT>=Build.VERSION_CODES.M)
-						selectedImFormat=ImageFormat.FLEX_RGB_888;
-					manualSwitch.setVisibility(View.VISIBLE);//
-					break;
-				case 2://raw
-				case 3://raw preview		//raw+jpeg
+				case 1://raw
+				case 2://raw preview		//raw+jpeg
 					selectedImFormat=ImageFormat.RAW_SENSOR;
 					manualSwitch.setVisibility(View.INVISIBLE);//won't capture raw in manual mode
+					break;
+				case 3://saved as TIFF
+					selectedImFormat=ImageFormat.RAW10;
+					manualSwitch.setVisibility(View.INVISIBLE);//
 					break;
 				}
 				rawSavePreview=position==3;
@@ -736,7 +862,7 @@ public class CameraFragment extends Fragment//https://www.youtube.com/playlist?l
 				if(selectedImFormat==ImageFormat.JPEG)
 					jpgQualitySpinner.setVisibility(View.VISIBLE);
 				else
-					jpgQualitySpinner.setVisibility(View.INVISIBLE);
+					jpgQualitySpinner.setVisibility(View.INVISIBLE);//*/
 				populateImResSpinner();
 
 				changeImRes();
@@ -824,6 +950,20 @@ public class CameraFragment extends Fragment//https://www.youtube.com/playlist?l
 			jpgQualitySpinner.setOnTouchListener(jpgQualityListener);
 		});
 
+		SpinnerSelectTouchListener burstListener=new SpinnerSelectTouchListener()//jpeg quality
+		{
+			@Override void itemSelected(AdapterView<?> parent, View view, int position, long id)
+			{
+				if(position>=0&&position<burstCounts.length)
+					burstCount=burstCounts[position];
+			}
+		};
+		burstSpinner.post(()->
+		{
+			burstSpinner.setOnItemSelectedListener(burstListener);
+			burstSpinner.setOnTouchListener(burstListener);
+		});
+
 		SpinnerSelectTouchListener vidResListener=new SpinnerSelectTouchListener()//video resolution
 		{
 			@Override void itemSelected(AdapterView<?> parent, View view, int position, long id)
@@ -891,9 +1031,12 @@ public class CameraFragment extends Fragment//https://www.youtube.com/playlist?l
 		});
 		zoomSlider.addOnChangeListener((slider, value, fromUser)->
 		{
-			zoomRatio=value;
-			setLabelZoom();
-			setSettings();
+			if(fromUser)
+			{
+				zoomRatio=value;
+				setLabelZoom();
+				setSettings();
+			}
 		});
 		manualSwitch.setOnClickListener(v->
 		{
@@ -969,18 +1112,24 @@ public class CameraFragment extends Fragment//https://www.youtube.com/playlist?l
 		});
 		focusSlider.addOnChangeListener((slider, value, fromUser)->
 		{
-			focus=value;
-			setLabelFocus();
-			setSettings();
+			if(fromUser)
+			{
+				focus=value;
+				setLabelFocus();
+				setSettings();
+			}
 		});
 		exposureSlider.addOnChangeListener((slider, value, fromUser)->
 		{
-			if(manualMode)
-				exposure=(long)(Math.exp(value)*1e6);
-			else
-				brightnessBias=(int)value;
-			setLabelBrightnessExposure();
-			setSettings();
+			if(fromUser)
+			{
+				if(manualMode)
+					exposure=(long)(Math.exp(value)*1e6);
+				else
+					brightnessBias=(int)value;
+				setLabelBrightnessExposure();
+				setSettings();
+			}
 		});
 		exposureSlider.setLabelFormatter(value->
 		{
@@ -989,6 +1138,9 @@ public class CameraFragment extends Fragment//https://www.youtube.com/playlist?l
 			return String.format(Locale.US, "%.2f EV", value*brightnessStep);
 		});
 
+		//context=getActivity();
+		imageSaver2.init(this);
+
 		//orientationListener=new OrientationEventListener(getActivity(), SensorManager.SENSOR_DELAY_NORMAL)
 		//{
 		//	int oldOrientation;
@@ -996,7 +1148,7 @@ public class CameraFragment extends Fragment//https://www.youtube.com/playlist?l
 		//	{
 		//		if(textureView!=null&&textureView.isAvailable()&&orientation/90!=oldOrientation/90)
 		//		{
-		//			setupCamera(true);
+		//			setupCamera(true, true);
 		//			oldOrientation=orientation;
 		//		}
 		//	}
@@ -1012,7 +1164,7 @@ public class CameraFragment extends Fragment//https://www.youtube.com/playlist?l
 		{
 			textureWidth=textureView.getWidth();//orientation may have changed
 			textureHeight=textureView.getHeight();
-			setupCamera(true);
+			setupCamera(true, true);
 			connectCamera();
 		}
 		else
@@ -1129,13 +1281,33 @@ public class CameraFragment extends Fragment//https://www.youtube.com/playlist?l
 		//exposureSlider.setVisibility(View.INVISIBLE);
 		//labelExposure.setVisibility(View.INVISIBLE);
 	}
-	boolean supportsRaw=false;
-	boolean camInfo_uninit=true;
-	ArrayList<String> camIds=new ArrayList<>();
+	boolean supportsRaw=false, supportsRaw10=false, supportsRaw12=false;
+	boolean camInfo_uninit=true, usePhysicalCamId=false;
+	static class CamId
+	{
+		String id, physicalId;
+		CamId(String _id){id=_id; physicalId=null;}
+		CamId(String _id, String _physicalId){id=_id; physicalId=_physicalId;}
+	}
+	ArrayList<CamId> camIds=new ArrayList<>();
+	//ArrayList<String> camIds=new ArrayList<>();
+	//ArrayList<Set<String>> physicalCamIds=new ArrayList<>();
 	ArrayList<Size> imResList=new ArrayList<>(), vidResList=new ArrayList<>();
-	int selectedCam=0, selectedImRes=0, selectedVidRes=0, selectedImFormat=ImageFormat.JPEG, selectedQuality=75;
-	boolean rawSavePreview=false;
-	int savePreviewRemaining=0;
+	int selectedCam=0, selectedImRes=0, selectedVidRes=0;
+	static final int
+		FORMAT_JPEG=0,
+		FORMAT_DNG=1,
+		FORMAT_RAW_PREVIEW_JPEG=2,//camera is in raw mode, but the screen preview is captured
+		FORMAT_RAW_HUFF=3,//Huffman-compressed raw10/raw12
+		FORMAT_RAW_UNC=4,//uncompressed raw10/raw12
+		FORMAT_GRAY_UNC=5;//uncompressed raw10/raw12, produces quarter-area +2 depth grayscale
+	//static final int FORMAT_JPEG=0, FORMAT_DNG=1, FORMAT_RAW_PREVIEW_JPEG=2, FORMAT_RAW10_TIFF=3, FORMAT_RAW12_TIFF=4;
+	int selectedQuality=75;
+	SparseIntArray imFormats=new SparseIntArray();
+	int selectedImFormat=FORMAT_JPEG;
+	//boolean rawSavePreview=false;
+	int[] burstCounts=new int[]{20, 50, 100, 200, 500, 1000, 2000};
+	int savePreviewRemaining=0, burstRemaining=0, burstCount=20;
 	//boolean rawPlusJPEG=false;
 	int clampIdx(int idx, int size)
 	{
@@ -1154,7 +1326,18 @@ public class CameraFragment extends Fragment//https://www.youtube.com/playlist?l
 			return "0";
 		}
 		selectedCam=clampIdx(selectedCam, count);
-		return camIds.get(selectedCam);
+		return camIds.get(selectedCam).id;
+	}
+	String getPhysicalCamId()
+	{
+		int count=camIds.size();
+		if(count==0)
+		{
+			error(894, "camIds is empty");
+			return "0";
+		}
+		selectedCam=clampIdx(selectedCam, count);
+		return camIds.get(selectedCam).physicalId;
 	}
 	Size getImRes()
 	{
@@ -1164,57 +1347,68 @@ public class CameraFragment extends Fragment//https://www.youtube.com/playlist?l
 		selectedImRes=clampIdx(selectedImRes, count);
 		return imResList.get(selectedImRes);
 	}
+	int getActualFormat()
+	{
+		switch(selectedImFormat)
+		{
+		case FORMAT_JPEG:
+			return ImageFormat.JPEG;
+
+		case FORMAT_DNG:
+		case FORMAT_RAW_PREVIEW_JPEG:
+			return ImageFormat.RAW_SENSOR;
+
+		case FORMAT_RAW_HUFF:
+		case FORMAT_RAW_UNC:
+		case FORMAT_GRAY_UNC:
+			if(supportsRaw12&&Build.VERSION.SDK_INT>=Build.VERSION_CODES.M)
+				return ImageFormat.RAW12;
+			return ImageFormat.RAW10;
+		}
+	/*	switch(selectedImFormat)
+		{
+		case FORMAT_JPEG:return ImageFormat.JPEG;
+		case FORMAT_DNG:
+		case FORMAT_RAW_PREVIEW_JPEG:return ImageFormat.RAW_SENSOR;
+		case FORMAT_RAW10_TIFF:return ImageFormat.RAW10;
+		case FORMAT_RAW12_TIFF:
+			if(Build.VERSION.SDK_INT>=Build.VERSION_CODES.M)
+				return ImageFormat.RAW12;
+			return 0;
+		}//*/
+		return 0;
+	}
 	void setImRes()//uses selectedImRes & selectedImFormat
 	{
 		Size imageSize=getImRes();
-		imageReader=ImageReader.newInstance(imageSize.getWidth(), imageSize.getHeight(), selectedImFormat, 1);
-		imageReader.setOnImageAvailableListener(reader->bkHandler.post(new ImageSaver(reader.acquireLatestImage())), bkHandler);
+		imageReader=ImageReader.newInstance(imageSize.getWidth(), imageSize.getHeight(), getActualFormat(), 1);
+		imageReader.setOnImageAvailableListener(reader->bkHandler.post(new ImageSaver(reader)), bkHandler);
 	}
 	void changeImRes()
 	{
-	/*	Size imageSize=getImRes();//WIP
-		imageReader=ImageReader.newInstance(imageSize.getWidth(), imageSize.getHeight(), selectedImFormat, 1);
-		imageReader.setOnImageAvailableListener(reader->bkHandler.post(new ImageSaver(reader.acquireLatestImage())), bkHandler);
-		Surface previewSurface=new Surface(texture);
+		CameraCaptureSession session;
+		if(isRecording)
+			session=recordCaptureSession;
+		else
+			session=previewCaptureSession;
 		try
 		{
-			cameraDevice.createCaptureSession(Arrays.asList(previewSurface, imageReader.getSurface()), new CameraCaptureSession.StateCallback()
-			{
-				@Override public void onConfigured(@NonNull CameraCaptureSession session)
-				{
-					previewCaptureSession=session;
-					try
-					{
-						previewCaptureSession.setRepeatingRequest(requestBuilder.build(), null, bkHandler);
-					}
-					catch(CameraAccessException e)
-					{
-						error(953, e);
-					}
-				}
-				@Override public void onConfigureFailed(@NonNull CameraCaptureSession session)
-				{
-					error(958, "Unable to setup camera preview");
-					//displayToast(false, "Unable to setup camera preview");
-				}
-			}, null);
-		}
-		catch(CameraAccessException e)
-		{
-			error(1022, e);
-		}//*/
-
-
-		Size imageSize=getImRes();//inline startPreview()	CRASH when called twice
-		imageReader=ImageReader.newInstance(imageSize.getWidth(), imageSize.getHeight(), selectedImFormat, 1);
-		imageReader.setOnImageAvailableListener(reader->bkHandler.post(new ImageSaver(reader.acquireLatestImage())), bkHandler);
-		SurfaceTexture texture=textureView.getSurfaceTexture();
-		if(DEBUG)
-			displayToast(false, "Preview resolution: "+previewSize.getWidth()+"x"+previewSize.getHeight());//
-		texture.setDefaultBufferSize(previewSize.getWidth(), previewSize.getHeight());
-		Surface previewSurface=new Surface(texture);
-		try
-		{
+			if(session!=null)
+				session.stopRepeating();
+			Size imageSize=getImRes();//inline startPreview()	CRASH when called twice
+			imageReader=ImageReader.newInstance(imageSize.getWidth(), imageSize.getHeight(), getActualFormat(), 1);
+			//imageReader.setOnImageAvailableListener(new ImageReader.OnImageAvailableListener()
+			//{
+			//	@Override public void onImageAvailable(ImageReader reader)
+			//	{
+			//	}
+			//}, bkHandler);
+			imageReader.setOnImageAvailableListener(reader->bkHandler.post(new ImageSaver(reader)), bkHandler);
+			SurfaceTexture texture=textureView.getSurfaceTexture();
+			if(DEBUG)
+				displayToast(false, "Preview resolution: "+previewSize.getWidth()+"x"+previewSize.getHeight());//
+			texture.setDefaultBufferSize(previewSize.getWidth(), previewSize.getHeight());
+			Surface previewSurface=new Surface(texture);
 			requestBuilder=cameraDevice.createCaptureRequest(CameraDevice.TEMPLATE_PREVIEW);
 			if(manualMode)
 			{
@@ -1298,7 +1492,7 @@ public class CameraFragment extends Fragment//https://www.youtube.com/playlist?l
 		{
 			CameraCharacteristics characteristics=manager.getCameraCharacteristics(id);
 			StreamConfigurationMap map=characteristics.get(CameraCharacteristics.SCALER_STREAM_CONFIGURATION_MAP);
-			Size[] resolutions=map.getOutputSizes(selectedImFormat);//image capture resolutions
+			Size[] resolutions=map.getOutputSizes(getActualFormat());//image capture resolutions
 
 			imResList.clear();
 			imResList.addAll(Arrays.asList(resolutions));
@@ -1320,7 +1514,7 @@ public class CameraFragment extends Fragment//https://www.youtube.com/playlist?l
 		matrix.postRotate(angle, cx, cy);
 		textureView.setTransform(matrix);
 	}
-	void setupCamera(boolean userSelectedCam)
+	void setupCamera(boolean userSelectedCam, boolean resume)
 	{
 		CameraManager manager=(CameraManager)getActivity().getSystemService(Context.CAMERA_SERVICE);
 		try
@@ -1334,12 +1528,46 @@ public class CameraFragment extends Fragment//https://www.youtube.com/playlist?l
 					this.camIds.ensureCapacity(camIds.length);
 					ArrayAdapter<String> adapter=new ArrayAdapter<>(getActivity(), R.layout.spinner_item);//TODO: populate string spinner
 					//ArrayAdapter<String> adapter=new ArrayAdapter<>(this, android.R.layout.simple_spinner_item);
+					if(Build.VERSION.SDK_INT>=Build.VERSION_CODES.P)//android 9
+						usePhysicalCamId=true;
 					for(String id:camIds)
 					{
+						boolean multiCamera=false;
 						//CameraCharacteristics characteristics=manager.getCameraCharacteristics(id);
 						//StreamConfigurationMap map=characteristics.get(CameraCharacteristics.SCALER_STREAM_CONFIGURATION_MAP);
-						this.camIds.add(id);
-						adapter.add(id);
+						if(Build.VERSION.SDK_INT>=Build.VERSION_CODES.P)//android 9
+						{
+							characteristics=manager.getCameraCharacteristics(id);
+							int[] capabilities=characteristics.get(CameraCharacteristics.REQUEST_AVAILABLE_CAPABILITIES);
+							for(int c:capabilities)
+							{
+								if(c==CameraMetadata.REQUEST_AVAILABLE_CAPABILITIES_LOGICAL_MULTI_CAMERA)
+								{
+									multiCamera=true;
+									break;
+								}
+							}
+							Set<String> physicalIds=characteristics.getPhysicalCameraIds();
+							if(physicalIds==null||physicalIds.size()==0)
+								multiCamera=false;
+							else
+							{
+								for(String physicalId:physicalIds)
+									this.camIds.add(new CamId(id, physicalId));
+							}
+						}
+						if(!multiCamera)
+							this.camIds.add(new CamId(id));
+					}
+					if(usePhysicalCamId)
+					{
+						for(CamId camId:this.camIds)
+							adapter.add(camId.id+"-"+camId.physicalId);
+					}
+					else
+					{
+						for(String id:camIds)
+							adapter.add(id);
 					}
 					adapter.setDropDownViewResource(android.R.layout.simple_spinner_dropdown_item);
 					camSpinner.setAdapter(adapter);
@@ -1357,88 +1585,138 @@ public class CameraFragment extends Fragment//https://www.youtube.com/playlist?l
 			//check camera2 support
 			//int hwLevel=characteristics.get(CameraCharacteristics.INFO_SUPPORTED_HARDWARE_LEVEL);
 
-			//initialize zoom
-			if(Build.VERSION.SDK_INT >= Build.VERSION_CODES.R)
-			{
-				Range<Float> zoomRange=characteristics.get(CameraCharacteristics.CONTROL_ZOOM_RATIO_RANGE);
-				if(zoomRange!=null)
-				{
-					zoomSupported=true;
-					zoomMin=zoomRange.getLower();
-					zoomMax=zoomRange.getUpper();
-					zoomSlider.setValueFrom(zoomMin);
-					zoomSlider.setValueTo(zoomMax);
-					zoomRatio=1;
-					zoomSlider.setValue(zoomRatio);
-				}
-			}
-			if(!zoomSupported)
-			{
-				zoomSlider.setVisibility(View.INVISIBLE);
-				labelZoom.setVisibility(View.INVISIBLE);
-			}
-
-			//initialize brightness
-			Range<Integer> brightnessRange=characteristics.get(CameraCharacteristics.CONTROL_AE_COMPENSATION_RANGE);
-			Rational brightnessStepFraction=characteristics.get(CameraCharacteristics.CONTROL_AE_COMPENSATION_STEP);
-			if(brightnessSupported=brightnessRange!=null&&brightnessStepFraction!=null)
-			{
-				brightnessMin=brightnessRange.getLower();
-				brightnessMax=brightnessRange.getUpper();
-				brightnessStep=brightnessStepFraction.floatValue();
-				//if(CaptureRequest.CONTROL_AE_EXPOSURE_COMPENSATION==null)
-					brightnessBias=(brightnessMin+brightnessMax)>>1;
-				//else
-				//	brightnessBias=characteristics.get(CaptureRequest.CONTROL_AE_EXPOSURE_COMPENSATION);
-				setSliderBrightness();
-				setLabelBrightnessExposure();
-				exposureSlider.setVisibility(View.VISIBLE);
-				labelExposure.setVisibility(View.VISIBLE);
-			}
-			else
-			{
-				exposureSlider.setVisibility(View.INVISIBLE);
-				labelExposure.setVisibility(View.INVISIBLE);
-			}
-
-			//check raw support
-			int[] capabilities=characteristics.get(CameraCharacteristics.REQUEST_AVAILABLE_CAPABILITIES);
-			for(int c: capabilities)
-			{
-				switch(c)
-				{
-				case CameraCharacteristics.REQUEST_AVAILABLE_CAPABILITIES_RAW:
-					supportsRaw=true;
-					break;
-				case CameraCharacteristics.REQUEST_AVAILABLE_CAPABILITIES_MANUAL_SENSOR:
-					supportsManual=true;
-					break;
-				case CameraCharacteristics.REQUEST_AVAILABLE_CAPABILITIES_READ_SENSOR_SETTINGS:
-					supportsReadSettings=true;
-					break;
-				}
-			}
-			if(!supportsManual)
-				manualSwitch.setVisibility(View.INVISIBLE);
-
-			int focusType=characteristics.get(CameraCharacteristics.LENS_INFO_FOCUS_DISTANCE_CALIBRATION);
-			if(focusType!=CameraMetadata.LENS_INFO_FOCUS_DISTANCE_CALIBRATION_UNCALIBRATED)
-			{
-				focusDiopter=true;
-				focusSlider.setLabelFormatter(value->
-				{
-					if(value==0)
-						return "Inf";
-					return String.format(Locale.US, "%.2fm", 1/value);
-				});
-			}
-
-			populateImResSpinner();
-			setImRes();
-			Size imRes=getImRes();
-
 			StreamConfigurationMap map=characteristics.get(CameraCharacteristics.SCALER_STREAM_CONFIGURATION_MAP);
 			assert map!=null;
+			if(!resume)
+			{
+				//initialize zoom
+				if(Build.VERSION.SDK_INT >= Build.VERSION_CODES.R)//android 11
+				{
+					Range<Float> zoomRange=characteristics.get(CameraCharacteristics.CONTROL_ZOOM_RATIO_RANGE);
+					if(zoomRange!=null)
+					{
+						zoomSupported=true;
+						zoomMin=zoomRange.getLower();
+						zoomMax=zoomRange.getUpper();
+						zoomSlider.setValueFrom(zoomMin);
+						zoomSlider.setValueTo(zoomMax);
+						zoomRatio=1;
+						zoomSlider.setValue(zoomRatio);
+					}
+				}
+				if(!zoomSupported)
+				{
+					zoomSlider.setVisibility(View.INVISIBLE);
+					labelZoom.setVisibility(View.INVISIBLE);
+				}
+
+				//initialize brightness
+				Range<Integer> brightnessRange=characteristics.get(CameraCharacteristics.CONTROL_AE_COMPENSATION_RANGE);
+				Rational brightnessStepFraction=characteristics.get(CameraCharacteristics.CONTROL_AE_COMPENSATION_STEP);
+				if(brightnessSupported=brightnessRange!=null&&brightnessStepFraction!=null)
+				{
+					brightnessMin=brightnessRange.getLower();
+					brightnessMax=brightnessRange.getUpper();
+					brightnessStep=brightnessStepFraction.floatValue();
+					//if(CaptureRequest.CONTROL_AE_EXPOSURE_COMPENSATION==null)
+						brightnessBias=(brightnessMin+brightnessMax)>>1;
+					//else
+					//	brightnessBias=characteristics.get(CaptureRequest.CONTROL_AE_EXPOSURE_COMPENSATION);
+					setSliderBrightness();
+					setLabelBrightnessExposure();
+					exposureSlider.setVisibility(View.VISIBLE);
+					labelExposure.setVisibility(View.VISIBLE);
+				}
+				else
+				{
+					exposureSlider.setVisibility(View.INVISIBLE);
+					labelExposure.setVisibility(View.INVISIBLE);
+				}
+
+				//check raw support
+				int[] capabilities=characteristics.get(CameraCharacteristics.REQUEST_AVAILABLE_CAPABILITIES);
+				for(int c: capabilities)
+				{
+					switch(c)
+					{
+					case CameraCharacteristics.REQUEST_AVAILABLE_CAPABILITIES_RAW:
+						supportsRaw=true;
+						break;
+					case CameraCharacteristics.REQUEST_AVAILABLE_CAPABILITIES_MANUAL_SENSOR:
+						supportsManual=true;
+						break;
+					case CameraCharacteristics.REQUEST_AVAILABLE_CAPABILITIES_READ_SENSOR_SETTINGS:
+						supportsReadSettings=true;
+						break;
+					}
+				}
+				if(!supportsManual)
+					manualSwitch.setVisibility(View.INVISIBLE);
+
+				int focusType=characteristics.get(CameraCharacteristics.LENS_INFO_FOCUS_DISTANCE_CALIBRATION);
+				if(focusType!=CameraMetadata.LENS_INFO_FOCUS_DISTANCE_CALIBRATION_UNCALIBRATED)
+				{
+					focusDiopter=true;
+					focusSlider.setLabelFormatter(value->
+					{
+						if(value==0)
+							return "Inf";
+						return String.format(Locale.US, "%.2fm", 1/value);
+					});
+				}
+
+				populateImResSpinner();
+				setImRes();
+				//Size imRes=getImRes();
+
+				int[] availableFormats=map.getOutputFormats();
+				surfaceView.setStatus(4000, "Available formats:");
+				for(int availableFormat: availableFormats)
+				{
+					if(availableFormat==ImageFormat.RAW10)
+						supportsRaw10=true;
+					else if(availableFormat==ImageFormat.RAW12)
+						supportsRaw12=true;
+					String str="";
+					switch(availableFormat)
+					{
+					case ImageFormat.DEPTH16:			str="ImageFormat.DEPTH16";break;
+					case ImageFormat.DEPTH_JPEG:		str="ImageFormat.DEPTH_JPEG";break;
+					case ImageFormat.DEPTH_POINT_CLOUD:	str="ImageFormat.DEPTH_POINT_CLOUD";break;
+					case ImageFormat.FLEX_RGB_888:		str="ImageFormat.FLEX_RGB_888";break;
+					case ImageFormat.FLEX_RGBA_8888:	str="ImageFormat.FLEX_RGBA_8888";break;
+					case ImageFormat.HEIC:				str="ImageFormat.HEIC";break;
+					case ImageFormat.JPEG:				str="ImageFormat.JPEG";break;
+					case ImageFormat.NV16:				str="ImageFormat.NV16";break;
+					case ImageFormat.NV21:				str="ImageFormat.NV21";break;
+					case ImageFormat.PRIVATE:			str="ImageFormat.PRIVATE";break;
+					case ImageFormat.RAW10:				str="ImageFormat.RAW10";break;
+					case ImageFormat.RAW12:				str="ImageFormat.RAW12";break;
+					case ImageFormat.RAW_PRIVATE:		str="ImageFormat.RAW_PRIVATE";break;
+					case ImageFormat.RAW_SENSOR:		str="ImageFormat.RAW_SENSOR";break;
+					case ImageFormat.RGB_565:			str="ImageFormat.RGB_565";break;
+					case ImageFormat.UNKNOWN:			str="ImageFormat.UNKNOWN";break;
+					case ImageFormat.Y8:				str="ImageFormat.Y8";break;
+					case ImageFormat.YUV_420_888:		str="ImageFormat.YUV_420_888";break;
+					case ImageFormat.YUV_422_888:		str="ImageFormat.YUV_422_888";break;
+					case ImageFormat.YUV_444_888:		str="ImageFormat.YUV_444_888";break;
+					case ImageFormat.YUY2:				str="ImageFormat.YUV2";break;
+					case ImageFormat.YV12:				str="ImageFormat.YV12";break;
+					case PixelFormat.OPAQUE:			str="PixelFormat.OPAQUE";break;
+				//	case PixelFormat.RGB_565:			str="PixelFormat.RGB_565";break;
+					case PixelFormat.RGB_888:			str="PixelFormat.RGB_888";break;
+					case PixelFormat.RGBA_8888:			str="PixelFormat.RGBA_8888";break;
+					case PixelFormat.RGBA_1010102:		str="PixelFormat.RGBA_1010102";break;
+					case PixelFormat.RGBA_F16:			str="PixelFormat.RGBA_F16";break;
+					case PixelFormat.RGBX_8888:			str="PixelFormat.RGBX_8888";break;
+					case PixelFormat.TRANSLUCENT:		str="PixelFormat.TRANSLUCENT";break;
+					case PixelFormat.TRANSPARENT:		str="PixelFormat.TRANSPARENT";break;
+				//	case PixelFormat.UNKNOWN:			str="PixelFormat.UNKNOWN";break;
+					}
+					surfaceView.setStatus(4000, str);
+				}
+			}//end if !resume
+
 			int deviceOrientation=getActivity().getWindowManager().getDefaultDisplay().getRotation();
 
 			int sensorOrientation=characteristics.get(CameraCharacteristics.SENSOR_ORIENTATION);//90	means portrait in natural position
@@ -1475,31 +1753,44 @@ public class CameraFragment extends Fragment//https://www.youtube.com/playlist?l
 				//}
 			}
 
-			int[] supportedFormats=map.getOutputFormats();
 			Size[] resolutions=map.getOutputSizes(SurfaceTexture.class);//preview resolutions
 			previewSize=resolutions[chooseOptimalSize(resolutions, rotatedWidth, rotatedHeight)];
 
-			//populate imFormatSpinner
-			ArrayAdapter<String> adapter=new ArrayAdapter<>(getActivity(), R.layout.spinner_item);//TODO: populate string spinner
-			adapter.setDropDownViewResource(android.R.layout.simple_spinner_dropdown_item);
-			adapter.add("JPEG");
-			adapter.add("PNG");
-			if(supportsRaw)
+			if(!resume)
 			{
-				adapter.add("RAW");
-				//if(!transformationNeeded)//if there is a transformation, getBitmap() is distorted
-					adapter.add("RAW Preview");
-				//adapter.add("RAW+JPEG");
-			}
-			imFormatSpinner.setAdapter(adapter);
-			imFormatSpinner.setSelection(0, false);
-			selectedImFormat=ImageFormat.JPEG;
+				//populate imFormatSpinner
+				imFormats.clear();
+				ArrayAdapter<String> adapter=new ArrayAdapter<>(getActivity(), R.layout.spinner_item);
+				adapter.setDropDownViewResource(android.R.layout.simple_spinner_dropdown_item);
+				int formatCount=0;
+				adapter.add(".JPG");	imFormats.append(formatCount, FORMAT_JPEG);	++formatCount;
+				if(supportsRaw)
+				{
+					adapter.add(".DNG");	imFormats.append(formatCount, FORMAT_DNG);	++formatCount;
+					adapter.add("RAW Preview .JPG");	imFormats.append(formatCount, FORMAT_RAW_PREVIEW_JPEG);	++formatCount;
+					if(supportsRaw12)
+					{
+						adapter.add("RAW12 .HUF (COMPR)");	imFormats.append(formatCount, FORMAT_RAW_HUFF);	++formatCount;
+						adapter.add("RAW12 .HUF (UNC)");	imFormats.append(formatCount, FORMAT_RAW_UNC);	++formatCount;
+						adapter.add("GRAY14 .HUF (UNC)");	imFormats.append(formatCount, FORMAT_GRAY_UNC);	++formatCount;
+					}
+					else if(supportsRaw10)
+					{
+						adapter.add("RAW10 .HUF (COMPR)");	imFormats.append(formatCount, FORMAT_RAW_HUFF);	++formatCount;
+						adapter.add("RAW10 .HUF (UNC)");	imFormats.append(formatCount, FORMAT_RAW_UNC);	++formatCount;
+						adapter.add("GRAY12 .HUF (UNC)");	imFormats.append(formatCount, FORMAT_GRAY_UNC);	++formatCount;
+					}
+				}
+				imFormatSpinner.setAdapter(adapter);
+				imFormatSpinner.setSelection(0, false);
+				selectedImFormat=FORMAT_JPEG;
 
-			resolutions=map.getOutputSizes(MediaRecorder.class);//video capture resolutions
-			selectedVidRes=chooseOptimalSize(resolutions, rotatedWidth, rotatedHeight);
-			vidResList.clear();
-			vidResList.addAll(Arrays.asList(resolutions));
-			populateResSpinner(vidResSpinner, resolutions, selectedVidRes);
+				resolutions=map.getOutputSizes(MediaRecorder.class);//video capture resolutions
+				selectedVidRes=chooseOptimalSize(resolutions, rotatedWidth, rotatedHeight);
+				vidResList.clear();
+				vidResList.addAll(Arrays.asList(resolutions));
+				populateResSpinner(vidResSpinner, resolutions, selectedVidRes);
+			}//end if !resume
 		}
 		catch(CameraAccessException e)
 		{
@@ -1587,6 +1878,9 @@ public class CameraFragment extends Fragment//https://www.youtube.com/playlist?l
 		try
 		{
 			requestBuilder=cameraDevice.createCaptureRequest(CameraDevice.TEMPLATE_PREVIEW);
+			String physicalId=getPhysicalCamId();
+			//if(usePhysicalCamId&&physicalId!=null)//TODO: support physical camera IDs
+			//	requestBuilder.set(CaptureRequest.REQUEST_AVAILABLE_CAPABILITIES_LOGICAL_MULTI_CAMERA);
 			if(manualMode)
 			{
 				requestBuilder.set(CaptureRequest.CONTROL_MODE, CameraMetadata.CONTROL_MODE_OFF);
@@ -1665,9 +1959,15 @@ public class CameraFragment extends Fragment//https://www.youtube.com/playlist?l
 		{
 			switch(selectedImFormat)
 			{
-			case ImageFormat.JPEG:			extension=".jpg";break;
-			case ImageFormat.RAW_SENSOR:	extension=".dng";break;
-			case ImageFormat.FLEX_RGB_888:	extension=".png";break;
+			case FORMAT_JPEG:case FORMAT_RAW_PREVIEW_JPEG:
+				extension=".jpg";
+				break;
+			case FORMAT_DNG:
+				extension=".dng";
+				break;
+			case FORMAT_RAW_HUFF:case FORMAT_RAW_UNC:case FORMAT_GRAY_UNC:
+				extension=".huf";
+				break;
 			}
 		}
 		else

@@ -4,18 +4,13 @@ import android.content.Context;
 import android.graphics.Canvas;
 import android.graphics.Color;
 import android.graphics.Paint;
-import android.graphics.PixelFormat;
-import android.graphics.PorterDuff;
 import android.os.Handler;
 import android.text.StaticLayout;
 import android.text.TextPaint;
 import android.util.AttributeSet;
 import android.util.DisplayMetrics;
 import android.view.MotionEvent;
-import android.view.SurfaceHolder;
-import android.view.SurfaceView;
 import android.view.View;
-import android.widget.TextView;
 
 import java.util.ArrayList;
 
@@ -26,6 +21,8 @@ public class CustomView extends View//https://stackoverflow.com/questions/311734
 	boolean showTouch=false;
 	float touchX, touchY;
 	int textSize=35, textSize2=75;
+	final Object mutex=new Object();
+	CameraFragment activity=null;
 
 	Context context;
 	TextPaint textPaint;
@@ -82,13 +79,60 @@ public class CustomView extends View//https://stackoverflow.com/questions/311734
 			canvas.drawCircle(touchX, touchY, 100, paint);
 		}
 		int count=msg.size();
-		for(int k=0, y=h>>2;k<count;++k)
-			y+=drawMultilineText(msg.get(k), 0, y, w, textPaint, canvas);
+		synchronized(mutex)
+		{
+			for(int k=count-1, y=h>>2;k>=0;--k)//newest-first
+			//for(int k=0, y=h>>2;k<count;++k)//oldest-first
+			{
+				y+=drawMultilineText(msg.get(k), 0, y, w, textPaint, canvas);
+				if(y>=h)
+					break;
+			}
+		}
 		//if(msgCount>0)
 		//	drawMultilineText(msg, 0, h>>1, w, textPaint, canvas);
 		//drawMultilineText("Hello World", 0, h>>1, 500, new TextPaint(), canvas);
 		//canvas.drawText("Hello\nWorld", 0, h>>1, paint);
-		canvas.drawText(""+frameCount, 0, textSize2, paint);
+		if(activity==null)
+			canvas.drawText(""+frameCount, 0, textSize2, paint);
+		else
+		{
+			String str="";
+			switch(activity.selectedImFormat)
+			{
+			case CameraFragment.FORMAT_JPEG:			str=".JPG";break;
+			case CameraFragment.FORMAT_DNG:				str=".DNG";break;
+			case CameraFragment.FORMAT_RAW_PREVIEW_JPEG:str="PREVIEW RAW .JPG";break;
+
+			case CameraFragment.FORMAT_RAW_HUFF:
+				if(activity.supportsRaw12)
+					str="RAW12 .HUF (COMP)";
+				else
+					str="RAW10 .HUF (COMP)";
+				break;
+			case CameraFragment.FORMAT_RAW_UNC:
+				if(activity.supportsRaw12)
+					str="RAW12 .HUF (UNC)";
+				else
+					str="RAW10 .HUF (UNC)";
+				break;
+			case CameraFragment.FORMAT_GRAY_UNC:
+				if(activity.supportsRaw12)
+					str="GRAY14 .HUF (UNC)";
+				else
+					str="GRAY12 .HUF (UNC)";
+				break;
+			}
+		/*	switch(activity.selectedImFormat)
+			{
+			case CameraFragment.FORMAT_JPEG:str="JPEG";break;
+			case CameraFragment.FORMAT_DNG:str="DNG";break;
+			case CameraFragment.FORMAT_RAW_PREVIEW_JPEG:str="PREVIEW RAW JPEG";break;
+			case CameraFragment.FORMAT_RAW10_TIFF:str="RAW10";break;
+			case CameraFragment.FORMAT_RAW12_TIFF:str="RAW12";break;
+			}//*/
+			canvas.drawText(str, 0, textSize2, paint);
+		}
 		++frameCount;
 	}
 	@Override public boolean onTouchEvent(MotionEvent event)
@@ -141,7 +185,12 @@ public class CustomView extends View//https://stackoverflow.com/questions/311734
 		new Handler().postDelayed(()->
 		{
 			if(msg.size()>0)
-				msg.remove(0);
+			{
+				synchronized(mutex)
+				{
+					msg.remove(0);
+				}
+			}
 			invalidate();
 		}, duration_ms);
 	}
