@@ -590,13 +590,10 @@ extern "C" jbyteArray Java_com_example_rawcamdemo_CameraFragment_compressAPI2(JN
 	else//compressed
 	{
 		short *image=nullptr;
-		if(bayer==0||bayer==1)
-		{
-			if(depth==10)
-				image=unpack_r10((byte*)packedImage, width, height);
-			else if(depth==12)
-				image=unpack_r12((byte*)packedImage, width, height);
-		}
+		if(depth==10)
+			image=unpack_r10((byte*)packedImage, width, height);
+		else if(depth==12)
+			image=unpack_r12((byte*)packedImage, width, height);
 		switch(version)
 		{
 		case 1://Huffman
