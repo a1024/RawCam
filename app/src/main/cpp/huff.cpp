@@ -13,7 +13,7 @@
 #define			console_end()
 
 #include		<cpu-features.h>
-#ifdef HAVE_NEON
+#if defined __arm__ || defined __aarch64__
 #include		<arm_neon.h>
 #endif
 #else
@@ -38,6 +38,8 @@ inline void		shift_left_vector_small(__m128i const &x, int n, __m128i &ret_lo, _
 //	#define		PRINT_TREE
 //	#define		PRINT_ALPHABET
 //	#define		PRINT_DATA
+//	#define		PRINT_V2
+//	#define		PRINT_V2_DATA
 
 
 enum 			SIMDSupport
@@ -182,6 +184,33 @@ static void		print_alphabet(vector_bool const *alphabet, const int *histogram, i
 		print_flush();
 	}
 }
+static void		print_histogram(int *histogram, int nlevels, int scanned_count, int *sort_idx)
+{
+	int histmax=0;
+	for(int k=0;k<nlevels;++k)
+		if(histmax<histogram[k])
+			histmax=histogram[k];
+	const int consolechars=79-15-5*(sort_idx!=0);
+	if(!histmax)
+		return;
+
+	if(sort_idx)
+		print("idx, ");
+	print("symbol, freq, %%");
+	print_flush();
+	for(int k=0;k<nlevels;++k)//print histogram
+	{
+		int symbol=sort_idx?sort_idx[k]:k;
+		if(!histogram[symbol])
+			continue;
+		if(sort_idx)
+			print("%4d ", k);
+		print("%4d %6d %2d ", symbol, histogram[symbol], histogram[symbol]*100/scanned_count);
+		for(int kr=0, count=histogram[symbol]*consolechars/histmax;kr<count;++kr)
+			print("*");
+		print_flush();
+	}
+}
 
 
 struct			Node
@@ -282,6 +311,391 @@ static void		calculate_histogram(const short *image, int size, int *histogram, i
 		++histogram[image[k]];
 }
 
+short*			unpack_r10(const byte* src, int width, int height)
+{
+	int imSize=width*height;
+	auto dst=new short[imSize];
+	for(int ks=0, kd=0;kd<imSize;ks+=5, kd+=4)
+	{
+		dst[kd  ]=src[ks  ]<<2|(src[ks+4]   &3);
+		dst[kd+1]=src[ks+1]<<2|(src[ks+4]>>2&3);
+		dst[kd+2]=src[ks+2]<<2|(src[ks+4]>>4&3);
+		dst[kd+3]=src[ks+3]<<2|(src[ks+4]>>6&3);
+		//if(dst[kd]>=1024||dst[kd+1]>=1024||dst[kd+2]>=1024||dst[kd+3]>=1024)
+		//{
+		//	LOGE("Image [%d] = %d", kd, dst[kd]);
+		//	LOGE("Image [%d] = %d", kd+1, dst[kd+1]);
+		//	LOGE("Image [%d] = %d", kd+2, dst[kd+2]);
+		//	LOGE("Image [%d] = %d", kd+3, dst[kd+3]);
+		//}
+	}
+	return dst;
+}
+#if 0
+short*			unpack_r10_simd(const byte* src, int width, int height)
+{
+	int imSize=width*height;
+	auto dst=new short[imSize];
+#ifdef __ARM_NEON
+	for(int ks=0, kd=0;kd<imSize;ks+=5, kd+=4)
+	{
+	}
+#elif !defined __ANDROID__
+#endif
+	return dst;
+}
+#endif
+short*			unpack_r12(const byte* src, int width, int height)
+{
+	int imSize=width*height;
+	auto dst=new short[imSize];
+	for(int ks=0, kd=0;kd<imSize;ks+=3, kd+=2)
+	{
+		dst[kd  ]=src[ks  ]<<4|(src[ks+2]   &15);
+		dst[kd+1]=src[ks+1]<<4|(src[ks+2]>>4&15);
+	}
+	return dst;
+}
+
+short*			bayer2gray(const short *src, int width, int height)//pass new (half) dimensions, +2 depth
+{
+	int w0=width<<1;
+	int imsize=width*height;
+	auto dst=new short[imsize];
+	for(int ky=0;ky<height;++ky)
+	{
+		int ky2=ky<<1;
+		const short *row=src+w0*ky2, *row2=row+w0;
+		for(int kx=0;kx<width;++kx)
+		{
+			int kx2=kx<<1;
+			dst[width*ky+kx]=row[kx2]+row[kx2+1]+row2[kx2]+row2[kx2+1];
+		}
+	}
+	return dst;
+}
+
+inline void 	denoise_laplace4(short *buffer, int bw, int bh, int w2, int x, int y, int threshold)
+{
+	int idx=bw*y+x;
+	int sum=(buffer[idx-2]+buffer[idx+2]+buffer[idx-w2]+buffer[idx+w2])>>2;
+	if(abs(buffer[idx]-sum)>threshold)
+		buffer[idx]=(short)sum;
+}
+inline void 	denoise_laplace8(short *buffer, int bw, int bh, int w2, int x, int y, int threshold)
+{
+	int idx=bw*y+x;
+	int sum=(
+		buffer[idx-w2-2]+buffer[idx-w2]+buffer[idx-w2+2]+
+		buffer[idx-2]+buffer[idx+2]+
+		buffer[idx+w2-2]+buffer[idx+w2]+buffer[idx+w2+2])>>3;
+	if(abs(buffer[idx]-sum)>threshold)
+		buffer[idx]=(short)sum;
+}
+void 			denoise_bayer(short *buffer, int bw, int bh, int depth)
+{
+	int threshold=1<<(depth-2);//quarter amplitude
+	int wm2=bw-4, hm2=bh-4, w2=bw<<1;
+	for(int ky=2;ky<hm2;ky+=2)
+	{
+		//LOGE("DENOISE ky=%d", ky);
+		for(int kx=2;kx<wm2;kx+=2)
+		{
+			//LOGE("DENOISE (%d, %d)", kx, ky);
+			//if(depth!=10||wm2!=bw-4||hm2!=bh-4)
+			//{
+			//	LOGE("DENOISE: CORRUPT STATE");
+			//	continue;
+			//}
+			//if(kx-2<0||kx+2>=bw||ky-2<0||ky+2>=bh)
+			//{
+			//	LOGE("DENOISE: OOB");
+			//	continue;
+			//}
+
+			denoise_laplace4(buffer, bw, bh, w2, kx  , ky  , threshold);
+			denoise_laplace4(buffer, bw, bh, w2, kx+1, ky  , threshold);
+			denoise_laplace4(buffer, bw, bh, w2, kx  , ky+1, threshold);
+			denoise_laplace4(buffer, bw, bh, w2, kx+1, ky+1, threshold);
+
+			//denoise_laplace8(buffer, bw, bh, w2, kx  , ky  , threshold);
+			//denoise_laplace8(buffer, bw, bh, w2, kx+1, ky  , threshold);
+			//denoise_laplace8(buffer, bw, bh, w2, kx  , ky+1, threshold);
+			//denoise_laplace8(buffer, bw, bh, w2, kx+1, ky+1, threshold);
+		}
+	}
+	//LOGE("DENOISE: DONE");
+}
+void			denoise_bayer_simd(short *buffer, int bw, int bh, int depth)
+{
+#ifdef __ARM_NEON
+	short threshold=1<<(depth-2);//quarter amplitude
+	int w2=bw<<1;
+	int16x8_t th={threshold, threshold, threshold, threshold, threshold, threshold, threshold, threshold};
+	int16x8_t minusone={-1, -1, -1, -1, -1, -1, -1, -1};
+/*	for(int ky=2, yend=bh-2;ky<yend;++ky)
+	{
+		for(int kx=2, xend=bw-70;kx<xend;kx+=64)//81.26ms
+		{
+			int idx=bw*ky+kx;
+			int16x8_t top[]={vld1q_s16(buffer+idx-w2), vld1q_s16(buffer+idx-w2+8), vld1q_s16(buffer+idx-w2+16), vld1q_s16(buffer+idx-w2+24), vld1q_s16(buffer+idx-w2+32), vld1q_s16(buffer+idx-w2+40), vld1q_s16(buffer+idx-w2+48), vld1q_s16(buffer+idx-w2+56)};
+			int16x8_t mid[]={vld1q_s16(buffer+idx-2), vld1q_s16(buffer+idx-2+8), vld1q_s16(buffer+idx-2+16), vld1q_s16(buffer+idx-2+24), vld1q_s16(buffer+idx-2+32), vld1q_s16(buffer+idx-2+40), vld1q_s16(buffer+idx-2+48), vld1q_s16(buffer+idx-2+56), vld1q_s16(buffer+idx-2+64)};
+			int16x8_t bot[]={vld1q_s16(buffer+idx+w2), vld1q_s16(buffer+idx+w2+8), vld1q_s16(buffer+idx+w2+16), vld1q_s16(buffer+idx+w2+24), vld1q_s16(buffer+idx+w2+32), vld1q_s16(buffer+idx+w2+40), vld1q_s16(buffer+idx+w2+48), vld1q_s16(buffer+idx+w2+56)};
+
+			top[0]=vaddq_s16(top[0], bot[0]);//add top + bottom		//bot registers are not needed
+			top[1]=vaddq_s16(top[1], bot[1]);
+			top[2]=vaddq_s16(top[2], bot[2]);
+			top[3]=vaddq_s16(top[3], bot[3]);
+			top[4]=vaddq_s16(top[4], bot[4]);
+			top[5]=vaddq_s16(top[5], bot[5]);
+			top[6]=vaddq_s16(top[6], bot[6]);
+			top[7]=vaddq_s16(top[7], bot[7]);
+
+			top[0]=vaddq_s16(top[0], mid[0]);//add left
+			top[1]=vaddq_s16(top[1], mid[1]);
+			top[2]=vaddq_s16(top[2], mid[2]);
+			top[3]=vaddq_s16(top[3], mid[3]);
+			top[4]=vaddq_s16(top[4], mid[4]);
+			top[5]=vaddq_s16(top[5], mid[5]);
+			top[6]=vaddq_s16(top[6], mid[6]);
+			top[7]=vaddq_s16(top[7], mid[7]);
+
+			bot[0]=vextq_s16(mid[0], mid[1], 4);//extract right
+			bot[1]=vextq_s16(mid[1], mid[2], 4);
+			bot[2]=vextq_s16(mid[2], mid[3], 4);
+			bot[3]=vextq_s16(mid[3], mid[4], 4);
+			bot[4]=vextq_s16(mid[4], mid[5], 4);
+			bot[5]=vextq_s16(mid[5], mid[6], 4);
+			bot[6]=vextq_s16(mid[6], mid[7], 4);
+			bot[7]=vextq_s16(mid[7], mid[8], 4);
+
+			top[0]=vaddq_s16(top[0], bot[0]);//add right
+			top[1]=vaddq_s16(top[1], bot[1]);
+			top[2]=vaddq_s16(top[2], bot[2]);
+			top[3]=vaddq_s16(top[3], bot[3]);
+			top[4]=vaddq_s16(top[4], bot[4]);
+			top[5]=vaddq_s16(top[5], bot[5]);
+			top[6]=vaddq_s16(top[6], bot[6]);
+			top[7]=vaddq_s16(top[7], bot[7]);
+
+			top[0]=vshrq_n_s16(top[0], 2);//divide sum by 4
+			top[1]=vshrq_n_s16(top[1], 2);
+			top[2]=vshrq_n_s16(top[2], 2);
+			top[3]=vshrq_n_s16(top[3], 2);
+			top[4]=vshrq_n_s16(top[4], 2);//divide sum by 4
+			top[5]=vshrq_n_s16(top[5], 2);
+			top[6]=vshrq_n_s16(top[6], 2);
+			top[7]=vshrq_n_s16(top[7], 2);
+
+			bot[0]=vextq_s16(mid[0], mid[1], 2);//extract center	//mid registers are not needed
+			bot[1]=vextq_s16(mid[1], mid[2], 2);
+			bot[2]=vextq_s16(mid[2], mid[3], 2);
+			bot[3]=vextq_s16(mid[3], mid[4], 2);
+			bot[4]=vextq_s16(mid[4], mid[5], 2);
+			bot[5]=vextq_s16(mid[5], mid[6], 2);
+			bot[6]=vextq_s16(mid[6], mid[7], 2);
+			bot[7]=vextq_s16(mid[7], mid[8], 2);
+
+			//average: top[], center: bot[], free: mid[]
+			mid[0]=vabdq_s16(bot[0], top[0]);//take abs difference
+			mid[1]=vabdq_s16(bot[1], top[1]);
+			mid[2]=vabdq_s16(bot[2], top[2]);
+			mid[3]=vabdq_s16(bot[3], top[3]);
+			mid[4]=vabdq_s16(bot[4], top[4]);//take abs difference
+			mid[5]=vabdq_s16(bot[5], top[5]);
+			mid[6]=vabdq_s16(bot[6], top[6]);
+			mid[7]=vabdq_s16(bot[7], top[7]);
+
+			mid[0]=vcgtq_s16(mid[0], th);//compare with threshold
+			mid[1]=vcgtq_s16(mid[1], th);
+			mid[2]=vcgtq_s16(mid[2], th);
+			mid[3]=vcgtq_s16(mid[3], th);
+			mid[4]=vcgtq_s16(mid[4], th);//compare with threshold
+			mid[5]=vcgtq_s16(mid[5], th);
+			mid[6]=vcgtq_s16(mid[6], th);
+			mid[7]=vcgtq_s16(mid[7], th);
+
+			top[0]=vandq_s16(top[0], mid[0]);
+			top[1]=vandq_s16(top[1], mid[1]);
+			top[2]=vandq_s16(top[2], mid[2]);
+			top[3]=vandq_s16(top[3], mid[3]);
+			top[4]=vandq_s16(top[4], mid[4]);
+			top[5]=vandq_s16(top[5], mid[5]);
+			top[6]=vandq_s16(top[6], mid[6]);
+			top[7]=vandq_s16(top[7], mid[7]);
+
+			mid[0]=veorq_s16(mid[0], minusone);
+			mid[1]=veorq_s16(mid[1], minusone);
+			mid[2]=veorq_s16(mid[2], minusone);
+			mid[3]=veorq_s16(mid[3], minusone);
+			mid[4]=veorq_s16(mid[4], minusone);
+			mid[5]=veorq_s16(mid[5], minusone);
+			mid[6]=veorq_s16(mid[6], minusone);
+			mid[7]=veorq_s16(mid[7], minusone);
+
+			bot[0]=vandq_s16(bot[0], mid[0]);
+			bot[1]=vandq_s16(bot[1], mid[1]);
+			bot[2]=vandq_s16(bot[2], mid[2]);
+			bot[3]=vandq_s16(bot[3], mid[3]);
+			bot[4]=vandq_s16(bot[4], mid[4]);
+			bot[5]=vandq_s16(bot[5], mid[5]);
+			bot[6]=vandq_s16(bot[6], mid[6]);
+			bot[7]=vandq_s16(bot[7], mid[7]);
+
+			top[0]=vorrq_s16(top[0], bot[0]);
+			top[1]=vorrq_s16(top[1], bot[1]);
+			top[2]=vorrq_s16(top[2], bot[2]);
+			top[3]=vorrq_s16(top[3], bot[3]);
+			top[4]=vorrq_s16(top[4], bot[4]);
+			top[5]=vorrq_s16(top[5], bot[5]);
+			top[6]=vorrq_s16(top[6], bot[6]);
+			top[7]=vorrq_s16(top[7], bot[7]);
+
+			vst1q_s16(buffer+idx   , top[0]);
+			vst1q_s16(buffer+idx+ 8, top[1]);
+			vst1q_s16(buffer+idx+16, top[2]);
+			vst1q_s16(buffer+idx+24, top[3]);
+			vst1q_s16(buffer+idx+32, top[4]);
+			vst1q_s16(buffer+idx+40, top[5]);
+			vst1q_s16(buffer+idx+48, top[6]);
+			vst1q_s16(buffer+idx+56, top[7]);
+		}
+	}//*/
+	for(int ky=2, yend=bh-2;ky<yend;++ky)
+	{
+		for(int kx=2, xend=bw-38;kx<xend;kx+=32)//81.23ms
+		{
+			int idx=bw*ky+kx;
+			int16x8_t top[]={vld1q_s16(buffer+idx-w2), vld1q_s16(buffer+idx-w2+8), vld1q_s16(buffer+idx-w2+16), vld1q_s16(buffer+idx-w2+24)};
+			int16x8_t mid[]={vld1q_s16(buffer+idx-2), vld1q_s16(buffer+idx-2+8), vld1q_s16(buffer+idx-2+16), vld1q_s16(buffer+idx-2+24), vld1q_s16(buffer+idx-2+32)};
+			int16x8_t bot[]={vld1q_s16(buffer+idx+w2), vld1q_s16(buffer+idx+w2+8), vld1q_s16(buffer+idx+w2+16), vld1q_s16(buffer+idx+w2+24)};
+
+			top[0]=vaddq_s16(top[0], bot[0]);//add top + bottom		//bot registers are not needed
+			top[1]=vaddq_s16(top[1], bot[1]);
+			top[2]=vaddq_s16(top[2], bot[2]);
+			top[3]=vaddq_s16(top[3], bot[3]);
+
+			top[0]=vaddq_s16(top[0], mid[0]);//add left
+			top[1]=vaddq_s16(top[1], mid[1]);
+			top[2]=vaddq_s16(top[2], mid[2]);
+			top[3]=vaddq_s16(top[3], mid[3]);
+
+			bot[0]=vextq_s16(mid[0], mid[1], 4);//extract right
+			bot[1]=vextq_s16(mid[1], mid[2], 4);
+			bot[2]=vextq_s16(mid[2], mid[3], 4);
+			bot[3]=vextq_s16(mid[3], mid[4], 4);
+
+			top[0]=vaddq_s16(top[0], bot[0]);//add right
+			top[1]=vaddq_s16(top[1], bot[1]);
+			top[2]=vaddq_s16(top[2], bot[2]);
+			top[3]=vaddq_s16(top[3], bot[3]);
+
+			top[0]=vshrq_n_s16(top[0], 2);//divide sum by 4
+			top[1]=vshrq_n_s16(top[1], 2);
+			top[2]=vshrq_n_s16(top[2], 2);
+			top[3]=vshrq_n_s16(top[3], 2);
+
+			bot[0]=vextq_s16(mid[0], mid[1], 2);//extract center	//mid registers are not needed
+			bot[1]=vextq_s16(mid[1], mid[2], 2);
+			bot[2]=vextq_s16(mid[2], mid[3], 2);
+			bot[3]=vextq_s16(mid[3], mid[4], 2);
+
+			//average: top[], center: bot[], free: mid[]
+			mid[0]=vabdq_s16(bot[0], top[0]);//take abs difference
+			mid[1]=vabdq_s16(bot[1], top[1]);
+			mid[2]=vabdq_s16(bot[2], top[2]);
+			mid[3]=vabdq_s16(bot[3], top[3]);
+
+			mid[0]=vcgtq_s16(mid[0], th);//compare with threshold
+			mid[1]=vcgtq_s16(mid[1], th);
+			mid[2]=vcgtq_s16(mid[2], th);
+			mid[3]=vcgtq_s16(mid[3], th);
+
+			top[0]=vandq_s16(top[0], mid[0]);
+			top[1]=vandq_s16(top[1], mid[1]);
+			top[2]=vandq_s16(top[2], mid[2]);
+			top[3]=vandq_s16(top[3], mid[3]);
+
+			mid[0]=veorq_s16(mid[0], minusone);
+			mid[1]=veorq_s16(mid[1], minusone);
+			mid[2]=veorq_s16(mid[2], minusone);
+			mid[3]=veorq_s16(mid[3], minusone);
+
+			bot[0]=vandq_s16(bot[0], mid[0]);
+			bot[1]=vandq_s16(bot[1], mid[1]);
+			bot[2]=vandq_s16(bot[2], mid[2]);
+			bot[3]=vandq_s16(bot[3], mid[3]);
+
+			top[0]=vorrq_s16(top[0], bot[0]);
+			top[1]=vorrq_s16(top[1], bot[1]);
+			top[2]=vorrq_s16(top[2], bot[2]);
+			top[3]=vorrq_s16(top[3], bot[3]);
+
+			vst1q_s16(buffer+idx   , top[0]);
+			vst1q_s16(buffer+idx+ 8, top[1]);
+			vst1q_s16(buffer+idx+16, top[2]);
+			vst1q_s16(buffer+idx+24, top[3]);
+		}
+	}//*/
+/*	for(int ky=2;ky<bh-2;++ky)
+	{
+		for(int kx=2;kx<bw-10;kx+=8)//131.53ms
+		{
+			int idx=bw*ky+kx;
+			auto vL=vld1q_s16(buffer+idx-2);
+			auto vR=vld1q_s16(buffer+idx+2);
+			auto vT=vld1q_s16(buffer+idx-w2);
+			auto vB=vld1q_s16(buffer+idx+w2);
+			auto vC=vld1q_s16(buffer+idx);
+
+			auto av=vaddq_s16(vL, vR);
+			av=vaddq_s16(av, vT);
+			av=vaddq_s16(av, vB);
+			av=vshrq_n_s16(av, 2);
+
+			auto cross=vabdq_s16(av, vC);//abs difference?
+			//auto cross=vsubq_s16(av, vC);
+			cross=vcgtq_s16(cross, th);
+			av=vandq_s16(av, cross);
+			cross=veorq_s16(cross, minusone);
+			vC=vandq_s16(vC, cross);
+			vC=vorrq_s16(vC, av);
+			vst1q_s16(buffer+idx, vC);
+		}
+	}//*/
+#elif !defined __ANDROID__
+	short threshold=1<<(depth-2);//quarter amplitude
+	int w2=bw<<1;
+	__m128i th=_mm_set1_epi16(threshold);
+	__m128i minusone=_mm_set1_epi32(-1);
+	for(int ky=2;ky<bh-2;++ky)
+	{
+		for(int kx=2;kx<bw-10;kx+=8)
+		{
+			int idx=bw*ky+kx;
+			__m128i vL=_mm_loadu_si128((__m128i*)(buffer+idx-2));
+			__m128i vR=_mm_loadu_si128((__m128i*)(buffer+idx+2));
+			__m128i vT=_mm_loadu_si128((__m128i*)(buffer+idx-w2));
+			__m128i vB=_mm_loadu_si128((__m128i*)(buffer+idx+w2));
+			__m128i vC=_mm_loadu_si128((__m128i*)(buffer+idx));
+
+			__m128i av=_mm_add_epi16(vL, vR);
+			av=_mm_add_epi16(av, vT);
+			av=_mm_add_epi16(av, vB);
+			av=_mm_srli_epi16(av, 2);
+
+			__m128i cross=_mm_sub_epi16(av, vC);
+			cross=_mm_abs_epi16(cross);
+			cross=_mm_cmpgt_epi16(cross, th);
+			av=_mm_and_si128(av, cross);
+			cross=_mm_xor_si128(cross, minusone);
+			vC=_mm_and_si128(vC, cross);
+			vC=_mm_or_si128(vC, av);
+			_mm_storeu_si128((__m128i*)(buffer+idx), vC);
+		}
+	}
+#endif
+}
 namespace		huff
 {
 	int			compress(const short *buffer, int bw, int bh, int depth, int bayer, std::vector<int> &data)
@@ -291,25 +705,29 @@ namespace		huff
 		short *temp=nullptr;
 		const short *b2;
 		int width, height, imSize;
-		if(bayer)//raw color
-			width=bw, height=bh, imSize=width*height, b2=buffer;
-		else//grayscale
+		if(bayer==0||bayer==1)//grayscale or gray denoised
 		{
 			width=bw>>1, height=bh>>1, imSize=width*height;
 			depth+=2;
-			temp=new short[imSize];
-			for(int ky=0;ky<height;++ky)
+			temp=bayer2gray(buffer, width, height);
+			time_mark("bayer2gray");
+			if(bayer==1)
 			{
-				int ky2=ky<<1;
-				const short *row=buffer+bw*ky2, *row2=buffer+bw*(ky2+1);
-				for(int kx=0;kx<width;++kx)
+				if(supportsSIMD)
 				{
-					int kx2=kx<<1;
-					temp[width*ky+kx]=row[kx2]+row[kx2+1]+row2[kx2]+row2[kx2+1];
+					denoise_bayer_simd(temp, width, height, depth);
+					time_mark("denoise SIMD");
+				}
+				else
+				{
+					denoise_bayer(temp, width, height, depth);
+					time_mark("denoise");
 				}
 			}
 			b2=temp;
 		}
+		else//raw color
+			width=bw, height=bh, imSize=width*height, b2=buffer;
 		int nLevels=1<<depth;
 
 		data.resize(sizeof(HuffHeader)/sizeof(int)+nLevels);
@@ -385,10 +803,10 @@ namespace		huff
 		length/=nLevels;
 		bits.data.reserve(length*width*height>>5);
 
-#ifdef __ANDROID__
+//#ifdef __ANDROID__
 		for(int k=0;k<imSize;++k)
 			bits.push_back(alphabet[b2[k]]);
-#else
+/*#else
 		for(int k=0;k<(int)alphabet.size();++k)
 			alphabet[k].set_size_factor(2);
 		for(int k=0;k<imSize;++k)
@@ -412,7 +830,7 @@ namespace		huff
 			}
 			bits.bitSize+=code.bitSize;
 		}
-#endif
+#endif//*/
 		bits.clear_tail();
 		time_mark("concatenate bits");
 #ifdef PRINT_DATA
@@ -431,15 +849,376 @@ namespace		huff
 		time_mark("memcpy");
 
 		//delete[] alphabet;
-		if(!bayer)
+		if(bayer==0||bayer==1)
 		{
 			delete[] temp;
 			b2=buffer;
+			time_mark("delete[] temp");
 		}
 		return data_start;
 	}
 	int			compress_v2(const short *buffer, int bw, int bh, int depth, int bayer, std::vector<int> &data)
 	{
+		time_start();
+		checkSIMD();
+		int imSize=bw*bh, nLevels=1<<depth;
+		data.resize(sizeof(HuffHeader)/sizeof(int)+nLevels);
+		auto header=(HuffHeader*)data.data();
+		*(int*)header->HUFF='H'|'U'<<8|'F'<<16|'F'<<24;
+		header->width=bw;
+		header->height=bh;
+		*(int*)header->bayerInfo=bayer;
+		header->nLevels=nLevels;
+		time_mark("header");
+
+		int *histogram=new int[nLevels];
+		calculate_histogram(buffer, imSize, histogram, nLevels);
+		time_mark("calculate histogram");
+
+		int *palette=(int*)header->histogram;
+		for(int k=0;k<nLevels;++k)
+			palette[k]=k;
+		time_mark("init palette");
+		std::sort(palette, palette+nLevels, [&](int idx1, int idx2)
+		{
+			return histogram[idx1]>histogram[idx2];//descending order
+		});
+		time_mark("sort palette");
+
+		int *invP=new int[nLevels];
+		for(int k=0;k<nLevels;++k)
+			invP[palette[k]]=k;
+		time_mark("init inv palette");
+
+		for(int k=0;k<nLevels;++k)
+		{
+			if(!histogram[palette[k]])
+			{
+				header->nLevels=k;
+				break;
+			}
+		}
+		time_mark("count present symbols");
+
+#ifdef PRINT_V2
+		print_histogram(histogram, nLevels, imSize, palette);
+		time_mark("print histogram");
+#endif
+
+		//for(int k=0;k<imSize;++k)
+		//	buffer[k]=invP[buffer[k]];
+		//time_mark("substitute pixels");
+
+		long long bitsize[3]={};
+		for(int k=0;k<nLevels;++k)
+		{
+			int symbol=invP[k];
+			int freq=histogram[k];
+
+			//estimate size with code A
+			if(symbol<3)
+				bitsize[0]+=2*freq;
+			else if(symbol<6)
+				bitsize[0]+=4*freq;
+			else if(symbol<21)
+				bitsize[0]+=8*freq;
+			else if(symbol<276)
+				bitsize[0]+=16*freq;
+			else
+				bitsize[0]+=32*freq;
+
+			//estimate size with code B
+			if(symbol<15)
+				bitsize[1]+=4*freq;
+			else if(symbol<30)
+				bitsize[1]+=8*freq;
+			else if(symbol<285)
+				bitsize[1]+=16*freq;
+			else
+				bitsize[1]+=32*freq;
+			//if(bitsize[0]>20000000||bitsize[0]>20000000||bitsize[0]>20000000)
+			//	int LOL_1=0;
+
+			//estimate size with code C from RVL
+			int bitlen=floor_log2(symbol);
+			bitlen=bitlen/3+((bitlen%3)!=0);//ceil(b/3)
+			bitlen<<=2;
+			bitsize[2]+=bitlen*freq;
+		}
+		int code_id=0;
+		for(int k=1;k<3;++k)
+			if(bitsize[code_id]>bitsize[k])
+				code_id=k;
+		time_mark("estimate sizes");
+#ifdef PRINT_V2
+		print("Code A: %lld bits", bitsize[0]), print_flush();
+		print("Code B: %lld bits", bitsize[1]), print_flush();
+		print("Code C: %lld bits", bitsize[2]), print_flush();
+		print("code_id: %d", code_id), print_flush();
+		time_mark("printf");
+#endif
+
+		header->version=2+code_id;
+		int intsize=bitsize[code_id];
+		intsize=(intsize>>5)+((intsize&31)!=0);
+		int data_idx=data.size();
+		data.resize(data_idx+sizeof(HuffDataHeader)/sizeof(int)+intsize+1);//header invalidated
+		auto hData=(HuffDataHeader*)(data.data()+data_idx);
+		*(int*)hData->DATA='D'|'A'<<8|'T'<<16|'A'<<24;
+		hData->uPxCount=imSize;
+		hData->cBitSize=bitsize[code_id];
+		int *bits=(int*)hData->data;
+
+		int bitidx=0;
+		int icode=0;
+		auto code=(unsigned char*)&icode;
+		switch(code_id)//all codes are little-endian
+		{
+		case 0://code A
+			for(int k=0;k<imSize;++k)
+			{
+				int symbol=invP[buffer[k]];
+				int intidx=bitidx>>5, bitoffset=bitidx&31;
+
+				int bitlen;
+				if(symbol<3)//frequent case fast
+				{
+					bits[intidx]|=symbol<<bitoffset, bitidx+=2;
+					continue;
+				}
+				if(symbol<6)
+					icode=(symbol-3)<<2|3, bitlen=4;
+				else if(symbol<21)
+					icode=(symbol-6)<<4|15, bitlen=8;
+				else if(symbol<276)
+					icode=(symbol-21)<<8|0xFF, bitlen=16;
+				else
+					icode=(symbol-276)<<16|0xFFFF, bitlen=32;
+				bits[intidx  ]|=icode<<bitoffset;
+				if(bitoffset)
+					bits[intidx+1]|=icode>>(32-bitoffset)&-!bitoffset;
+				bitidx+=bitlen;
+
+			/*	int bitlen;
+				if(symbol<3)//frequent case fast
+				{
+					bits[intidx]|=symbol<<bitoffset, bitidx+=2;
+					continue;
+				}
+				if(symbol<6)
+					icode=0xC|(symbol-3), bitlen=4;
+				else if(symbol<21)
+					icode=0xF0|(symbol-6), bitlen=8;
+				else if(symbol<276)
+					code[0]=0xFF, code[1]=symbol-21, code[2]=code[3]=0, bitlen=16;
+				else
+				{
+					int c2=symbol-276;
+					code[0]=0xFF, code[1]=0xFF, code[2]=c2>>8, code[3]=c2&0xFF, bitlen=32;
+				}
+				bits[intidx]|=icode<<bitoffset;
+				bitidx+=bitlen;
+				//if((bitidx>>5)>intidx)
+					bits[bitidx>>5]|=icode>>(32-(bitidx&31));//*/
+
+			/*	char code[4]={0};
+				int bitlen;
+				if(symbol<3)
+					code[0]=symbol, bitlen=2;
+				else if(symbol<6)
+					code[0]=0xC|(symbol-3), bitlen=4;
+				else if(symbol<21)
+					code[0]=0xF0|(symbol-6), bitlen=8;
+				else if(symbol<276)
+					code[0]=0xFF, code[1]=symbol-21, bitlen=16;
+				else
+				{
+					int c2=symbol-276;
+					code[0]=0xFF, code[1]=0xFF, code[2]=c2>>8, code[3]=c2&0xFF, bitlen=32;
+				}
+				bitidx+=bitlen;//*/
+			}
+			time_mark("encode A");
+			break;
+		case 1://code B
+			for(int k=0;k<imSize;++k)
+			{
+				int symbol=invP[buffer[k]];
+				int intidx=bitidx>>5, bitoffset=bitidx&31;
+				int bitlen;
+				if(symbol<15)//frequent case fast
+				{
+					bits[intidx]|=symbol<<bitoffset, bitidx+=4;
+					continue;
+				}
+				if(symbol<30)
+					icode=(symbol-15)<<4|15, bitlen=8;
+				else if(symbol<285)
+					icode=(symbol-30)<<8|0xFF, bitlen=16;
+				else
+					icode=(symbol-285)<<16|0xFFFF, bitlen=32;
+				bits[intidx  ]|=icode<<bitoffset;
+				if(bitoffset)
+					bits[intidx+1]|=icode>>(32-bitoffset)&-!bitoffset;
+				bitidx+=bitlen;
+			}
+			time_mark("encode B");
+			break;
+		case 2://code C
+			for(int k=0;k<imSize;++k)
+			{
+				int symbol=invP[buffer[k]];
+				int intidx=bitidx>>5, bitoffset=bitidx&31;
+
+				//if(symbol==8)
+				//	int LOL_1=0;
+
+				//split bits into groups of 3
+				int x=(symbol&(7<<9))<<3|(symbol&(7<<6))<<2|(symbol&(7<<3))<<1|symbol&7;//up to 2^12 levels
+
+				//set 4th bit
+				x|=x<<1&0x8888;
+				x|=x<<2&0x8888;
+				x|=x<<3&0x8888;
+				x|=(x&0x8888)>>4;
+				x|=(x&0x8888)>>8;
+
+				int bitlen=(!x+((x&8)>>3)+((x&0x80)>>7)+((x&0x800)>>11)+((x&0x8000)>>15))<<2;
+				x=x&0x7777|(x&0x8888)>>4;//clear MSB
+
+				bits[intidx]|=x<<bitoffset;
+				if(bitoffset)
+					bits[intidx+1]|=x>>(32-bitoffset);
+					//bits[intidx+1]|=x>>(32-bitoffset)&-!bitoffset;//X undefined behavior
+				bitidx+=bitlen;
+				//bits[intidx]|=x<<bitoffset;
+				//bitidx+=bitlen;
+				//bits[bitidx>>5]|=x>>(32-(bitidx&31));
+
+			/*	//slow reference
+				int bitlen;
+				if(symbol<8)
+				{
+					bits[intidx]|=symbol<<bitoffset, bitidx+=4;
+					continue;
+				}
+				if(symbol<64)
+					icode=(8|symbol&7)<<4|symbol>>3, bitlen=8;
+				else if(symbol<(1<<9))
+					icode=(8|symbol&7)<<4|symbol>>3, bitlen=12;//X //*/
+			}
+			time_mark("encode C");
+			break;
+		}
+#ifdef PRINT_V2_DATA
+		for(int k=0;k<intsize;++k)
+			printf("%08X-", bits[k]);
+		printf("\n");
+#endif
+
+		delete[] histogram;
+		time_mark("cleanup");
+		return data_idx;
+	}
+	int			compress_v5(const short *buffer, int bw, int bh, int depth, int bayer, std::vector<int> &data)
+	{
+		time_start();
+		checkSIMD();
+		const int hSize=sizeof(HuffHeader)/sizeof(int);
+
+		short *temp=nullptr;
+		const short *b2;
+		int width, height, imSize;
+		if(bayer==0||bayer==1)//grayscale or gray denoised
+		{
+			width=bw>>1, height=bh>>1, imSize=width*height;
+			depth+=2;
+			temp=bayer2gray(buffer, width, height);
+			time_mark("bayer2gray");
+			if(bayer==1)
+			{
+				if(supportsSIMD)
+				{
+					denoise_bayer_simd(temp, width, height, depth);
+					time_mark("denoise SIMD");
+				}
+				else
+				{
+					denoise_bayer(temp, width, height, depth);
+					time_mark("denoise");
+				}
+				bayer=0;
+			}
+			b2=temp;
+		}
+		else//raw color
+			width=bw, height=bh, imSize=width*height, b2=buffer;
+
+		int nLevels=1<<depth;
+		data.reserve(hSize+(imSize>>1));
+		data.resize(hSize);
+		auto header=(HuffHeader*)data.data();
+		*(int*)header->HUFF='H'|'U'<<8|'F'<<16|'F'<<24;
+		header->version=5;//RVL
+		header->width=width;
+		header->height=height;
+		*(int*)header->bayerInfo=bayer;
+		header->nLevels=nLevels;
+		time_mark("header");
+
+		int bitidx=0;
+		for(int ky=0;ky<height;++ky)
+		{
+			data.resize(hSize+(bitidx>>5)+(width>>1));
+			auto bits=((HuffHeader*)data.data())->histogram;
+			int prev=0;
+			const short *row=b2+width*ky;
+			for(int kx=0;kx<width;++kx)
+			{
+				//if(ky==819&&kx==761)
+				//	int LOL_1=0;
+				int symbol=row[kx]-prev;
+				prev=row[kx];
+
+				int negative=symbol<0;
+				symbol=abs(symbol+negative)<<1|negative;//zigzag coding
+				//symbol=symbol<<1^symbol>>31;//1 is unused
+
+				int x=(symbol&(7<<12))<<4|(symbol&(7<<9))<<3|(symbol&(7<<6))<<2|(symbol&(7<<3))<<1|symbol&7;//up to 2^14 levels
+
+				//set 4th bit
+				x|=x<<1&0x88888;
+				x|=x<<2&0x88888;
+				x|=x<<3&0x88888;
+				x|=(x&0x88888)>>4;
+				x|=(x&0x88888)>>4;
+				x|=(x&0x88888)>>8;
+
+				int bitlen=(!x+((x&8)>>3)+((x&0x80)>>7)+((x&0x800)>>11)+((x&0x8000)>>15)+((x&0x80000)>>19))<<2;
+				x=x&0x77777|(x&0x88888)>>4;//clear MSB
+
+				int intidx=bitidx>>5, bitoffset=bitidx&31;
+				//if(intidx==6)//
+				//	int LOL_1=0;//
+				bits[intidx]|=x<<bitoffset;
+				if(bitoffset)
+					bits[intidx+1]|=x>>(32-bitoffset);
+				bitidx+=bitlen;
+			}
+		}
+		time_mark("encode RVL");
+#ifdef PRINT_V2
+		print("Compressed stream size = %d", bitidx), print_flush();
+#endif
+		data.resize(hSize+(bitidx>>5)+((bitidx&31)!=0));
+		time_mark("resize");
+		if(bayer==0||bayer==1)
+		{
+			delete[] temp;
+			b2=buffer;
+			time_mark("delete[] temp");
+		}
+		return sizeof(HuffHeader)/sizeof(int);
 	}
 	int			pack_raw(const byte *buffer, int bw, int bh, int depth, int bayer, std::vector<int> &data)
 	{
@@ -466,9 +1245,10 @@ namespace		huff
 		time_mark("memcpy");
 		return sizeof(HuffHeader)/sizeof(int);
 	}
-	int			pack_r10_g12(const byte *buffer, int bw, int bh, std::vector<int> &data)
+	int			pack_r10_g12(const byte *buffer, int bw, int bh, int denoise, std::vector<int> &data)
 	{
 		time_start();
+		checkSIMD();
 		int w2=bw>>1, h2=bh>>1, imsize0=bw*bh, imsize2=imsize0>>2, packedbytesize=imsize2*3>>1, packedintsize=(packedbytesize>>2)+((packedbytesize&3)!=0);
 		data.resize(sizeof(HuffHeader)/sizeof(int)+packedintsize);
 		auto header=(HuffHeader*)data.data();
@@ -481,25 +1261,59 @@ namespace		huff
 		time_mark("header");
 
 		auto dst=(byte*)header->histogram;
-		int srcbytewidth=bw*5>>2;
-		for(int ky=0, kd=0;ky<bh;ky+=2)//raw10 -> g12
+		if(denoise)
 		{
-			auto row=buffer+srcbytewidth*ky, row2=row+srcbytewidth;
-			for(int kx=0, ks=0;kx<bw;kx+=4, ks+=5, kd+=3)
+			auto src=unpack_r10(buffer, bw, bh);
+			time_mark("unpack raw10");
+			if(supportsSIMD)
 			{
-				int v00=row[ks  ]<<2|row[ks+4]   &3,
-					v01=row[ks+1]<<2|row[ks+4]>>2&3,
-					v02=row[ks+2]<<2|row[ks+4]>>4&3,
-					v03=row[ks+3]<<2|row[ks+4]>>6&3;
-				int v10=row2[ks  ]<<2|row2[ks+4]   &3,
-					v11=row2[ks+1]<<2|row2[ks+4]>>2&3,
-					v12=row2[ks+2]<<2|row2[ks+4]>>4&3,
-					v13=row2[ks+3]<<2|row2[ks+4]>>6&3;
-				int g0=v00+v01+v10+v11, g1=v02+v03+v12+v13;
-				dst[kd  ]=g0>>4;
-				dst[kd+1]=g1>>4;
-				dst[kd+2]=(g1&15)<<4|g0&15;
+				denoise_bayer_simd(src, bw, bh, 10);
+				time_mark("denoise SIMD");
 			}
+			else
+			{
+				denoise_bayer(src, bw, bh, 10);
+				time_mark("denoise");
+			}
+
+			for(int ky=0, kd=0;ky<bh;ky+=2)//g12
+			{
+				auto row=src+bw*ky, row2=row+bw;
+				for(int kx=0;kx<bw;kx+=4, kd+=3)
+				{
+					int g0=row[kx  ]+row[kx+1]+row2[kx  ]+row2[kx+1],
+						g1=row[kx+2]+row[kx+3]+row2[kx+2]+row2[kx+3];
+					dst[kd  ]=g0>>4;
+					dst[kd+1]=g1>>4;
+					dst[kd+2]=(g1&15)<<4|g0&15;
+				}
+			}
+			time_mark("pack gray12");
+			delete[] src;
+		}
+		else
+		{
+			int srcbytewidth=bw*5>>2;
+			for(int ky=0, kd=0;ky<bh;ky+=2)//raw10 -> g12
+			{
+				auto row=buffer+srcbytewidth*ky, row2=row+srcbytewidth;
+				for(int kx=0, ks=0;kx<bw;kx+=4, ks+=5, kd+=3)
+				{
+					int v00=row[ks  ]<<2|row[ks+4]   &3,
+						v01=row[ks+1]<<2|row[ks+4]>>2&3,
+						v02=row[ks+2]<<2|row[ks+4]>>4&3,
+						v03=row[ks+3]<<2|row[ks+4]>>6&3;
+					int v10=row2[ks  ]<<2|row2[ks+4]   &3,
+						v11=row2[ks+1]<<2|row2[ks+4]>>2&3,
+						v12=row2[ks+2]<<2|row2[ks+4]>>4&3,
+						v13=row2[ks+3]<<2|row2[ks+4]>>6&3;
+					int g0=v00+v01+v10+v11, g1=v02+v03+v12+v13;
+					dst[kd  ]=g0>>4;
+					dst[kd+1]=g1>>4;
+					dst[kd+2]=(g1&15)<<4|g0&15;
+				}
+			}
+			time_mark("pack 10->g12");
 		}
 	/*	for(int ky=0, kd=0;ky<bh;ky+=2)//unpacked -> g12
 		{
@@ -513,12 +1327,12 @@ namespace		huff
 				dst[kd+2]=(v1&15)<<4|v0&15;
 			}
 		}//*/
-		time_mark("pack 10->g12");
 		return sizeof(HuffHeader)/sizeof(int);
 	}
-	int			pack_r12_g14(const byte *buffer, int bw, int bh, std::vector<int> &data)
+	int			pack_r12_g14(const byte *buffer, int bw, int bh, int denoise, std::vector<int> &data)
 	{
 		time_start();
+		checkSIMD();
 		int w2=bw>>1, h2=bh>>1, imsize0=bw*bh, imsize2=imsize0>>2, packedbytesize=imsize2*3>>1, packedintsize=(packedbytesize>>2)+((packedbytesize&3)!=0);
 		data.resize(sizeof(HuffHeader)/sizeof(int)+packedintsize);
 		auto header=(HuffHeader*)data.data();
@@ -531,34 +1345,73 @@ namespace		huff
 		time_mark("header");
 
 		auto dst=(byte*)header->histogram;
-		int srcbytewidth=bw*3>>1;
-		for(int ky=0, kd=0;ky<bh;ky+=2)//raw12 -> g14
+		if(denoise)
 		{
-			auto row=buffer+srcbytewidth*ky, row2=row+srcbytewidth;
-			for(int kx=0, ks=0;kx<bw;kx+=8, ks+=20, kd+=7)
+			auto src=unpack_r10(buffer, bw, bh);
+			time_mark("unpack raw12");
+			if(supportsSIMD)
 			{
-				int v00=row[ks   ]<<4|row[ks   +3]&15, v01=row[ks   +1]<<4|row[ks   +3]>>4&15;
-				int v02=row[ks+ 5]<<4|row[ks+ 5+3]&15, v03=row[ks+ 5+1]<<4|row[ks+ 5+3]>>4&15;
-				int v04=row[ks+10]<<4|row[ks+10+3]&15, v05=row[ks+10+1]<<4|row[ks+10+3]>>4&15;
-				int v06=row[ks+15]<<4|row[ks+15+3]&15, v07=row[ks+15+1]<<4|row[ks+15+3]>>4&15;
-				int v10=row2[ks   ]<<4|row2[ks   +3]&15, v11=row2[ks   +1]<<4|row2[ks   +3]>>4&15;
-				int v12=row2[ks+ 5]<<4|row2[ks+ 5+3]&15, v13=row2[ks+ 5+1]<<4|row2[ks+ 5+3]>>4&15;
-				int v14=row2[ks+10]<<4|row2[ks+10+3]&15, v15=row2[ks+10+1]<<4|row2[ks+10+3]>>4&15;
-				int v16=row2[ks+10]<<4|row2[ks+10+3]&15, v17=row2[ks+10+1]<<4|row2[ks+10+3]>>4&15;
-				int g0=v00+v01+v10+v11,
-					g1=v02+v03+v12+v13,
-					g2=v04+v05+v14+v15,
-					g3=v06+v07+v16+v17;
-				dst[kd  ]=g0>>6;
-				dst[kd+1]=g1>>6;
-				dst[kd+2]=g2>>6;
-				dst[kd+3]=g3>>6;
-				dst[kd+4]=(g1>>2&15)<<4|(g0>>2&15);
-				dst[kd+5]=(g3>>2&15)<<4|(g2>>2&15);
-				dst[kd+6]=(g3&3)<<6|(g2&3)<<4|(g1&3)<<2|g0&3;
+				denoise_bayer_simd(src, bw, bh, 12);
+				time_mark("denoise SIMD");
 			}
+			else
+			{
+				denoise_bayer(src, bw, bh, 12);
+				time_mark("denoise");
+			}
+
+			for(int ky=0, kd=0;ky<bh;ky+=2)//raw12 -> g14
+			{
+				auto row=src+bw*ky, row2=row+bw;
+				for(int kx=0;kx<bw;kx+=8, kd+=7)
+				{
+					int g0=row[kx  ]+row[kx+1]+row2[kx  ]+row2[kx+1],
+						g1=row[kx+2]+row[kx+3]+row2[kx+2]+row2[kx+3],
+						g2=row[kx+4]+row[kx+5]+row2[kx+4]+row2[kx+5],
+						g3=row[kx+6]+row[kx+7]+row2[kx+6]+row2[kx+7];
+					dst[kd  ]=g0>>6;
+					dst[kd+1]=g1>>6;
+					dst[kd+2]=g2>>6;
+					dst[kd+3]=g3>>6;
+					dst[kd+4]=(g1>>2&15)<<4|(g0>>2&15);
+					dst[kd+5]=(g3>>2&15)<<4|(g2>>2&15);
+					dst[kd+6]=(g3&3)<<6|(g2&3)<<4|(g1&3)<<2|g0&3;
+				}
+			}
+			time_mark("pack gray14");
+			delete[] src;
 		}
-		time_mark("pack 12->g14");
+		else
+		{
+			int srcbytewidth=bw*3>>1;
+			for(int ky=0, kd=0;ky<bh;ky+=2)//raw12 -> g14
+			{
+				auto row=buffer+srcbytewidth*ky, row2=row+srcbytewidth;
+				for(int kx=0, ks=0;kx<bw;kx+=8, ks+=20, kd+=7)
+				{
+					int v00=row[ks   ]<<4|row[ks   +3]&15, v01=row[ks   +1]<<4|row[ks   +3]>>4&15;
+					int v02=row[ks+ 5]<<4|row[ks+ 5+3]&15, v03=row[ks+ 5+1]<<4|row[ks+ 5+3]>>4&15;
+					int v04=row[ks+10]<<4|row[ks+10+3]&15, v05=row[ks+10+1]<<4|row[ks+10+3]>>4&15;
+					int v06=row[ks+15]<<4|row[ks+15+3]&15, v07=row[ks+15+1]<<4|row[ks+15+3]>>4&15;
+					int v10=row2[ks   ]<<4|row2[ks   +3]&15, v11=row2[ks   +1]<<4|row2[ks   +3]>>4&15;
+					int v12=row2[ks+ 5]<<4|row2[ks+ 5+3]&15, v13=row2[ks+ 5+1]<<4|row2[ks+ 5+3]>>4&15;
+					int v14=row2[ks+10]<<4|row2[ks+10+3]&15, v15=row2[ks+10+1]<<4|row2[ks+10+3]>>4&15;
+					int v16=row2[ks+10]<<4|row2[ks+10+3]&15, v17=row2[ks+10+1]<<4|row2[ks+10+3]>>4&15;
+					int g0=v00+v01+v10+v11,
+						g1=v02+v03+v12+v13,
+						g2=v04+v05+v14+v15,
+						g3=v06+v07+v16+v17;
+					dst[kd  ]=g0>>6;
+					dst[kd+1]=g1>>6;
+					dst[kd+2]=g2>>6;
+					dst[kd+3]=g3>>6;
+					dst[kd+4]=(g1>>2&15)<<4|(g0>>2&15);
+					dst[kd+5]=(g3>>2&15)<<4|(g2>>2&15);
+					dst[kd+6]=(g3&3)<<6|(g2&3)<<4|(g1&3)<<2|g0&3;
+				}
+			}
+			time_mark("pack 12->g14");
+		}
 		return sizeof(HuffHeader)/sizeof(int);
 	}
 	bool		decompress(const byte *data, int bytesize, RequestedFormat format, void **pbuffer, int &bw, int &bh, int &depth, char *bayer_sh)//realloc will be used on buffer
@@ -569,7 +1422,7 @@ namespace		huff
 		console_start_good();
 		print("decode_huff"), print_flush();
 #endif
-		auto header=(HuffHeader*)data;
+		auto header=(HuffHeader const*)data;
 		if(*(int*)header->HUFF!=('H'|'U'<<8|'F'<<16|'F'<<24)||header->nLevels>(1<<16))
 		{
 			LOG_ERROR("Invalid file tag: %c%c%c%c, ver: %d, w=%d, h=%d", header->HUFF[0], header->HUFF[1], header->HUFF[2], header->HUFF[3], header->version, header->width, header->height);
@@ -709,39 +1562,144 @@ namespace		huff
 			}
 			time_mark("decode");
 		}
-		else if(header->version==2)//encoded with palette
+		else if(header->version==2||header->version==3||header->version==4)//encoded with palette
 		{
+			auto hData=(HuffDataHeader const*)(header->histogram+header->nLevels);
+			int *bits=(int*)hData->data;
+			int bitidx=0;
+			switch(header->version)
+			{
+			case 2://code A
+				for(int k=0;k<imSize;++k)
+				{
+					int symbol=0;
+					int code;
+					int intidx=bitidx>>5, bitoffset=bitidx&31;
+					if(bitoffset)
+						code=bits[intidx+1]<<(32-bitoffset)|bits[intidx]>>bitoffset;
+					else
+						code=bits[intidx];
+					if((code&3)<3)
+						symbol=code, bitidx+=2;
+					else if((code&15)<15)
+						symbol=(code>>2)+3, bitidx+=4;
+					else if((code&0xFF)<0xFF)
+						symbol=(code>>4)+6, bitidx+=8;
+					else if((code&0xFFFF)<0xFFFF)
+						symbol=(code>>8)+21, bitidx+=16;
+					else
+						symbol=(code>>16)+276, bitidx+=32;
+					dst[k]=symbol;
+				}
+				break;
+			case 3://code B
+				for(int k=0;k<imSize;++k)
+				{
+					int symbol=0;
+					int code;
+					int intidx=bitidx>>5, bitoffset=bitidx&31;
+					if(bitoffset)
+						code=bits[intidx+1]<<(32-bitoffset)|bits[intidx]>>bitoffset;
+					else
+						code=bits[intidx];
+					if((code&15)<15)
+						symbol=code, bitidx+=4;
+					else if((code&0xFF)<0xFF)
+						symbol=(code>>4)+15, bitidx+=8;
+					else if((code&0xFFFF)<0xFFFF)
+						symbol=(code>>8)+30, bitidx+=16;
+					else
+						symbol=(code>>16)+285, bitidx+=32;
+					dst[k]=symbol;
+				}
+				break;
+			case 4://code C
+				for(int k=0;k<imSize;++k)
+				{
+					//if(k==28)
+					//	int LOL_1=0;
+					int symbol=0;
+					int code, bitlen=0;
+					do
+					{
+						code=bits[bitidx>>5]>>(bitidx&31)&15;
+						symbol|=(code&7)<<bitlen;
+						bitlen+=3, bitidx+=4;
+					}while(code&8);
+					dst[k]=symbol;
+				}
+				break;
+			}
+			time_mark("decode");
+
+			int *palette=(int*)header->histogram;
+			for(int k=0;k<imSize;++k)
+				dst[k]=palette[dst[k]];
+			time_mark("substitute");
+		}
+		else if(header->version==5)//RVL
+		{
+			int *bits=(int*)header->histogram;
+			int bitidx=0;
+			for(int ky=0;ky<header->height;++ky)
+			{
+				int prev=0;
+				auto row=dst+header->width*ky;
+				for(int kx=0;kx<header->width;++kx)
+				{
+					int symbol=0;
+					int code, bitlen=0;
+					do
+					{
+						code=bits[bitidx>>5]>>(bitidx&31)&15;
+						symbol|=(code&7)<<bitlen;
+						bitlen+=3, bitidx+=4;
+					}while(code&8);
+
+					int s0=symbol;
+
+					int negative=symbol&1;
+					symbol=symbol>>1^-negative;
+
+					row[kx]=prev+symbol;
+					prev=row[kx];
+				}
+			}
+			time_mark("decode RVL");
 		}
 		else if(header->version==10)//uncompressed raw10
 		{
 			auto buf=(byte*)header->histogram;
-			for(int kd=0, ks=0;kd<imSize&&sizeof(HuffHeader)+ks<bytesize;kd+=4, ks+=5)
+			for(int kd=0, ks=0;kd<imSize&&(int)sizeof(HuffHeader)+ks<bytesize;kd+=4, ks+=5)
 			{
 				dst[kd  ]=buf[ks  ]<<2|buf[ks+4]   &3;
 				dst[kd+1]=buf[ks+1]<<2|buf[ks+4]>>2&3;
 				dst[kd+2]=buf[ks+2]<<2|buf[ks+4]>>4&3;
 				dst[kd+3]=buf[ks+3]<<2|buf[ks+4]>>6&3;
 			}
+			time_mark("decode raw10");
 		}
 		else if(header->version==12)//uncompressed raw12
 		{
 			auto buf=(byte*)header->histogram;
-			for(int kd=0, ks=0;kd<imSize&&sizeof(HuffHeader)+ks<bytesize;kd+=2, ks+=3)
+			for(int kd=0, ks=0;kd<imSize&&(int)sizeof(HuffHeader)+ks<bytesize;kd+=2, ks+=3)
 			{
 				dst[kd  ]=buf[ks  ]<<4|buf[ks+2]   &15;
 				dst[kd+1]=buf[ks+1]<<4|buf[ks+2]>>4&15;
 			}
+			time_mark("decode raw12");
 		}
 		else if(header->version==14)//uncompressed raw14
 		{
 			auto buf=(byte*)header->histogram;
-			for(int kd=0, ks=0;kd<imSize&&sizeof(HuffHeader)+ks<bytesize;kd+=4, ks+=7)
+			for(int kd=0, ks=0;kd<imSize&&(int)sizeof(HuffHeader)+ks<bytesize;kd+=4, ks+=7)
 			{
 				dst[kd  ]=buf[ks  ]<<6|buf[ks+4]   &15|buf[ks+6]   &3;
 				dst[kd+1]=buf[ks+1]<<6|buf[ks+4]>>4&15|buf[ks+6]>>2&3;
 				dst[kd+2]=buf[ks+2]<<6|buf[ks+5]   &15|buf[ks+6]>>4&3;
 				dst[kd+3]=buf[ks+3]<<6|buf[ks+5]>>4&15|buf[ks+6]>>6&3;
 			}
+			time_mark("decode raw14");
 		}
 
 		//on success

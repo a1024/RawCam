@@ -464,39 +464,7 @@ static int		compress_huff(const short *buffer, int bw, int bh, int depth, int ba
 }
 #endif
 
-short* unpack_r10(const byte* src, int width, int height)
-{
-	int imSize=width*height;
-	auto dst=new short[imSize];
-	for(int ks=0, kd=0;kd<imSize;ks+=5, kd+=4)
-	{
-		dst[kd  ]=src[ks  ]<<2|(src[ks+4]   &3);
-		dst[kd+1]=src[ks+1]<<2|(src[ks+4]>>2&3);
-		dst[kd+2]=src[ks+2]<<2|(src[ks+4]>>4&3);
-		dst[kd+3]=src[ks+3]<<2|(src[ks+4]>>6&3);
-		if(dst[kd]>=1024||dst[kd+1]>=1024||dst[kd+2]>=1024||dst[kd+3]>=1024)
-		{
-			LOGE("Image [%d] = %d", kd, dst[kd]);
-			LOGE("Image [%d] = %d", kd+1, dst[kd+1]);
-			LOGE("Image [%d] = %d", kd+2, dst[kd+2]);
-			LOGE("Image [%d] = %d", kd+3, dst[kd+3]);
-		}
-	}
-	return dst;
-}
-short* unpack_r12(const byte* src, int width, int height)
-{
-	int imSize=width*height;
-	auto dst=new short[imSize];
-	for(int ks=0, kd=0;kd<imSize;ks+=3, kd+=2)
-	{
-		dst[kd  ]=src[ks  ]<<4|(src[ks+2]   &15);
-		dst[kd+1]=src[ks+1]<<4|(src[ks+2]>>4&15);
-	}
-	return dst;
-}
-
-extern "C" jbyteArray Java_com_example_rawcamdemo_CameraFragment_compress(JNIEnv *env, jobject thiz, jbyteArray data, jint width, jint height, jint depth, jint bayer)
+/*extern "C" jbyteArray Java_com_example_rawcamdemo_CameraFragment_compress(JNIEnv *env, jobject thiz, jbyteArray data, jint width, jint height, jint depth, jint bayer)
 {
 	auto packedImage=env->GetByteArrayElements(data, nullptr);
 	if(!packedImage)
@@ -555,31 +523,93 @@ extern "C" jbyteArray Java_com_example_rawcamdemo_CameraFragment_pack_1raw(JNIEn
 	env->SetByteArrayRegion(ret, 0, byteSize, (jbyte*)output.data());
 	return ret;
 }
-extern "C" jbyteArray Java_com_example_rawcamdemo_CameraFragment_pack_1r10g12(JNIEnv *env, jobject thiz, jbyteArray data, jint width, jint height)
+extern "C" jbyteArray Java_com_example_rawcamdemo_CameraFragment_pack_1r10g12(JNIEnv *env, jobject thiz, jbyteArray data, jint width, jint height, jint denoise)
 {
 	auto packedImage=env->GetByteArrayElements(data, nullptr);
 	if(!packedImage)
 		return nullptr;
 
 	std::vector<int> output;
-	huff::pack_r10_g12((byte*)packedImage, width, height, output);
+	huff::pack_r10_g12((byte*)packedImage, width, height, denoise, output);
 
 	int byteSize=output.size()*sizeof(int);
 	jbyteArray ret=env->NewByteArray(byteSize);
 	env->SetByteArrayRegion(ret, 0, byteSize, (jbyte*)output.data());
 	return ret;
 }
-extern "C" jbyteArray Java_com_example_rawcamdemo_CameraFragment_pack_1r12g14(JNIEnv *env, jobject thiz, jbyteArray data, jint width, jint height)
+extern "C" jbyteArray Java_com_example_rawcamdemo_CameraFragment_pack_1r12g14(JNIEnv *env, jobject thiz, jbyteArray data, jint width, jint height, jint denoise)
 {
 	auto packedImage=env->GetByteArrayElements(data, nullptr);
 	if(!packedImage)
 		return nullptr;
 
 	std::vector<int> output;
-	huff::pack_r12_g14((byte*)packedImage, width, height, output);
+	huff::pack_r12_g14((byte*)packedImage, width, height, denoise, output);
 
 	int byteSize=output.size()*sizeof(int);
 	jbyteArray ret=env->NewByteArray(byteSize);
 	env->SetByteArrayRegion(ret, 0, byteSize, (jbyte*)output.data());
 	return ret;
+}//*/
+jbyteArray make_java_buffer(JNIEnv *env, const byte *data, int byteSize)
+{
+	jbyteArray ret=env->NewByteArray(byteSize);
+	env->SetByteArrayRegion(ret, 0, byteSize, (jbyte*)data);
+	return ret;
+}
+//depth	10/12
+//bayer	0: gray, 1: gray denoised, ...: color
+//version	0: uncompressed (turns to 10/12/14), 1: v1, 5: RVL (channels are separated in case of color)
+extern "C" jbyteArray Java_com_example_rawcamdemo_CameraFragment_compressAPI2(JNIEnv *env, jobject thiz, jbyteArray data, jint width, jint height, jint depth, jint bayer, jint version)
+{
+	switch(version)
+	{
+	case 0://uncompressed
+	case 1://Huffman
+	case 5://RVL
+		break;
+	default:
+		LOGE("Invalid HUFF version");
+		return nullptr;
+	}
+
+	auto packedImage=env->GetByteArrayElements(data, nullptr);
+	if(!packedImage)
+		return nullptr;
+
+	std::vector<int> output;
+	if(!version)//uncompressed
+	{
+		if(bayer!=0&&bayer!=1)//r10/12
+			huff::pack_raw((const byte*)packedImage, width, height, depth, bayer, output);
+		else if(depth==10)
+			huff::pack_r10_g12((const byte*)packedImage, width, height, bayer, output);
+		else if(depth==12)
+			huff::pack_r12_g14((const byte*)packedImage, width, height, bayer, output);
+	}
+	else//compressed
+	{
+		short *image=nullptr;
+		if(bayer==0||bayer==1)
+		{
+			if(depth==10)
+				image=unpack_r10((byte*)packedImage, width, height);
+			else if(depth==12)
+				image=unpack_r12((byte*)packedImage, width, height);
+		}
+		switch(version)
+		{
+		case 1://Huffman
+			huff::compress(image, width, height, depth, bayer, output);
+			break;
+		case 5://RVL
+			huff::compress_v5(image, width, height, depth, bayer, output);
+			break;
+		default:
+			LOGE("Invalid HUFF version");
+			return nullptr;
+		}
+		delete[] image;
+	}
+	return make_java_buffer(env, (byte*)output.data(), output.size()*sizeof(int));
 }

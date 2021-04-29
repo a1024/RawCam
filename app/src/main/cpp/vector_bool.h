@@ -8,10 +8,8 @@
 #else
 #define			NOEXCEPT	noexcept
 #endif
-#ifdef __ANDROID__
 void 			print(const char *format, ...);
 void 			print_flush();
-#endif
 
 #define			CEIL_UNITS(BIT_SIZE)		(((BIT_SIZE)>>LBPU)+(((BIT_SIZE)&BPU_MASK)!=0))
 #define			BYTE_SIZE(BIT_SIZE)			(CEIL_UNITS(BIT_SIZE)<<LOG_BYTES_PER_UNIT)
@@ -130,6 +128,12 @@ struct			vector_bool//LSB-first: MSB {b31...b0} LSB, b0 is the 1st bit in bitstr
 //#endif
 	}
 
+	void set_size_factor(int log_unit_factor)//resize to a multiple of 1<<log_unit_factor, (pass 2 for int and 128bit SIMD)
+	{
+		int unit_factor=1<<log_unit_factor, uf_mask=unit_factor-1;
+		int size=data.size();
+		data.resize((size&~uf_mask)+(((size&uf_mask)!=0)<<log_unit_factor));
+	}
 	void debug_print(int start_bit_idx)const
 	{
 		print("bitSize: %d", bitSize), print_flush();

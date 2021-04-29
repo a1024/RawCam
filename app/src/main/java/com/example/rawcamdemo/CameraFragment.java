@@ -79,10 +79,15 @@ public class CameraFragment extends Fragment//https://www.youtube.com/playlist?l
 	{
 		System.loadLibrary("archiver");
 	}
-	public native byte[] compress(byte[] data, int width, int height, int depth, int bayer);
-	public native byte[] pack_raw(byte[] data, int width, int height, int depth, int bayer);
-	public native byte[] pack_r10g12(byte[] data, int width, int height);
-	public native byte[] pack_r12g14(byte[] data, int width, int height);
+	//public native byte[] compress(byte[] data, int width, int height, int depth, int bayer);//huf
+	//public native byte[] pack_raw(byte[] data, int width, int height, int depth, int bayer);//uncompressed raw10/12
+	//public native byte[] pack_r10g12(byte[] data, int width, int height, int denoise);//uncompressed g12
+	//public native byte[] pack_r12g14(byte[] data, int width, int height, int denoise);//uncompressed g14
+
+	//depth	10/12
+	//bayer	0: gray, 1: gray denoised, ...: color
+	//version	0: uncompressed (turns to 10/12/14), 1: v1, 5: RVL (channels are separated in case of color)
+	public native byte[] compressAPI2(byte[] data, int width, int height, int depth, int bayer, int version);
 
 
 	static final int CAMERA_REQUEST=0, STORAGE_REQUEST=1;
@@ -270,6 +275,7 @@ public class CameraFragment extends Fragment//https://www.youtube.com/playlist?l
 			synchronized(mutex)
 			{
 				Image image=reader.acquireLatestImage();
+				createMediaFilename(MediaType.IMAGE);
 				int format=image.getFormat();
 				ByteBuffer buffer;
 				String result=null;
@@ -305,21 +311,54 @@ public class CameraFragment extends Fragment//https://www.youtube.com/playlist?l
 						byte[] bits=new byte[buffer.remaining()];
 						buffer.get(bits);
 						byte[] data=null;
+
 						switch(selectedImFormat)
 						{
-						case FORMAT_RAW_HUFF:
+						case FORMAT_RAW_HUFF_V1:
+							data=compressAPI2(bits, iw, ih, depth, bayer, 1);
+							break;
+						case FORMAT_RAW_HUFF_RVL://20210429
+							data=compressAPI2(bits, iw, ih, depth, bayer, 5);
+							break;
+						case FORMAT_RAW_UNC:
+							data=compressAPI2(bits, iw, ih, depth, bayer, 0);
+							break;
+						case FORMAT_GRAY_UNC:
+							data=compressAPI2(bits, iw, ih, depth, 0, 0);
+							break;
+						case FORMAT_GRAY_UNC_DENOISE:
+							data=compressAPI2(bits, iw, ih, depth, 1, 0);
+							break;
+						case FORMAT_GRAY_RVL_DENOISE://20210429
+							data=compressAPI2(bits, iw, ih, depth, 1, 5);
+							break;
+						}
+
+					/*	switch(selectedImFormat)
+						{
+						case FORMAT_RAW_HUFF_V1:
 							data=compress(bits, iw, ih, depth, bayer);
+							break;
+						case FORMAT_RAW_HUFF_RVL://TODO 20210429
 							break;
 						case FORMAT_RAW_UNC:
 							data=pack_raw(bits, iw, ih, depth, bayer);
 							break;
 						case FORMAT_GRAY_UNC:
 							if(supportsRaw12)
-								data=pack_r12g14(bits, iw, ih);
+								data=pack_r12g14(bits, iw, ih, 0);
 							else
-								data=pack_r10g12(bits, iw, ih);
+								data=pack_r10g12(bits, iw, ih, 0);
 							break;
-						}
+						case FORMAT_GRAY_UNC_DENOISE:
+							if(supportsRaw12)
+								data=pack_r12g14(bits, iw, ih, 1);
+							else
+								data=pack_r10g12(bits, iw, ih, 1);
+							break;
+						case FORMAT_GRAY_RVL_DENOISE://TODO 20210429
+							break;
+						}//*/
 						if(data!=null)
 							result=imageSaver2.saveBinary(filename, data);
 						if(result!=null)
@@ -339,7 +378,7 @@ public class CameraFragment extends Fragment//https://www.youtube.com/playlist?l
 		@Override public void onCaptureStarted(@NonNull CameraCaptureSession session, @NonNull CaptureRequest request, long timestamp, long frameNumber)
 		{
 			super.onCaptureStarted(session, request, timestamp, frameNumber);
-			createMediaFilename(MediaType.IMAGE);
+			//createMediaFilename(MediaType.IMAGE);
 		}
 	};
 	CameraCaptureSession.CaptureCallback focusCallback=new CameraCaptureSession.CaptureCallback()
@@ -413,8 +452,9 @@ public class CameraFragment extends Fragment//https://www.youtube.com/playlist?l
 			super.onCaptureCompleted(session, request, result);
 			--burstRemaining;
 			loge("Burst frame: "+(burstCount-burstRemaining)+"/"+burstCount);
-			createMediaFilename(MediaType.IMAGE);
-			//if(burstRemaining==0)
+			//createMediaFilename(MediaType.IMAGE);
+			if(burstRemaining==0)
+				startPreview();
 		}
 		@Override public void onCaptureFailed(@NonNull CameraCaptureSession session, @NonNull CaptureRequest request, @NonNull CaptureFailure failure)
 		{
@@ -667,9 +707,12 @@ public class CameraFragment extends Fragment//https://www.youtube.com/playlist?l
 					surfaceView.setStatus(4000, "Burst of "+burstCount+" begins in 4 seconds...");
 					new Handler().postDelayed(()->savePreviewRemaining=burstCount, 4000);
 					return;
-				case FORMAT_RAW_HUFF:
+				case FORMAT_RAW_HUFF_V1:
+				case FORMAT_RAW_HUFF_RVL:
 				case FORMAT_RAW_UNC:
 				case FORMAT_GRAY_UNC://20210423
+				case FORMAT_GRAY_UNC_DENOISE://20210424
+				case FORMAT_GRAY_RVL_DENOISE:
 					surfaceView.setStatus(4000, "Burst of "+burstCount+" begins in 4 seconds...");
 					new Handler().postDelayed(()->
 					{
@@ -692,7 +735,7 @@ public class CameraFragment extends Fragment//https://www.youtube.com/playlist?l
 					}, 4000);
 					return;
 				}
-				if(Build.VERSION.SDK_INT>=Build.VERSION_CODES.M&&ActivityCompat.checkSelfPermission(getActivity(), Manifest.permission.WRITE_EXTERNAL_STORAGE)!=PackageManager.PERMISSION_GRANTED)
+				if(Build.VERSION.SDK_INT>=Build.VERSION_CODES.M&&Build.VERSION.SDK_INT<Build.VERSION_CODES.R&&ActivityCompat.checkSelfPermission(getActivity(), Manifest.permission.WRITE_EXTERNAL_STORAGE)!=PackageManager.PERMISSION_GRANTED)
 				{
 					if(shouldShowRequestPermissionRationale(Manifest.permission.WRITE_EXTERNAL_STORAGE))
 						displayRealToast(true, "Need permission for external storage to save media");
@@ -830,9 +873,12 @@ public class CameraFragment extends Fragment//https://www.youtube.com/playlist?l
 					break;
 				case FORMAT_DNG:
 				case FORMAT_RAW_PREVIEW_JPEG:
-				case FORMAT_RAW_HUFF:
+				case FORMAT_RAW_HUFF_V1:
+				case FORMAT_RAW_HUFF_RVL:
 				case FORMAT_RAW_UNC:
 				case FORMAT_GRAY_UNC:
+				case FORMAT_GRAY_UNC_DENOISE:
+				case FORMAT_GRAY_RVL_DENOISE:
 					burstSpinner.setVisibility(View.VISIBLE);
 					break;
 				}
@@ -1298,9 +1344,12 @@ public class CameraFragment extends Fragment//https://www.youtube.com/playlist?l
 		FORMAT_JPEG=0,
 		FORMAT_DNG=1,
 		FORMAT_RAW_PREVIEW_JPEG=2,//camera is in raw mode, but the screen preview is captured
-		FORMAT_RAW_HUFF=3,//Huffman-compressed raw10/raw12
-		FORMAT_RAW_UNC=4,//uncompressed raw10/raw12
-		FORMAT_GRAY_UNC=5;//uncompressed raw10/raw12, produces quarter-area +2 depth grayscale
+		FORMAT_RAW_HUFF_V1=3,//Huffman-compressed raw10/raw12
+		FORMAT_RAW_HUFF_RVL=4,//RVL-compressed raw10/12		CHANNELS ARE SEPARATED
+		FORMAT_RAW_UNC=5,//uncompressed raw10/raw12
+		FORMAT_GRAY_UNC=6,//uncompressed raw10/raw12, produces quarter-area +2 depth grayscale
+		FORMAT_GRAY_UNC_DENOISE=7,
+		FORMAT_GRAY_RVL_DENOISE=8;
 	//static final int FORMAT_JPEG=0, FORMAT_DNG=1, FORMAT_RAW_PREVIEW_JPEG=2, FORMAT_RAW10_TIFF=3, FORMAT_RAW12_TIFF=4;
 	int selectedQuality=75;
 	SparseIntArray imFormats=new SparseIntArray();
@@ -1358,9 +1407,12 @@ public class CameraFragment extends Fragment//https://www.youtube.com/playlist?l
 		case FORMAT_RAW_PREVIEW_JPEG:
 			return ImageFormat.RAW_SENSOR;
 
-		case FORMAT_RAW_HUFF:
+		case FORMAT_RAW_HUFF_V1:
+		case FORMAT_RAW_HUFF_RVL:
 		case FORMAT_RAW_UNC:
 		case FORMAT_GRAY_UNC:
+		case FORMAT_GRAY_UNC_DENOISE:
+		case FORMAT_GRAY_RVL_DENOISE:
 			if(supportsRaw12&&Build.VERSION.SDK_INT>=Build.VERSION_CODES.M)
 				return ImageFormat.RAW12;
 			return ImageFormat.RAW10;
@@ -1770,15 +1822,21 @@ public class CameraFragment extends Fragment//https://www.youtube.com/playlist?l
 					adapter.add("RAW Preview .JPG");	imFormats.append(formatCount, FORMAT_RAW_PREVIEW_JPEG);	++formatCount;
 					if(supportsRaw12)
 					{
-						adapter.add("RAW12 .HUF (COMPR)");	imFormats.append(formatCount, FORMAT_RAW_HUFF);	++formatCount;
-						adapter.add("RAW12 .HUF (UNC)");	imFormats.append(formatCount, FORMAT_RAW_UNC);	++formatCount;
-						adapter.add("GRAY14 .HUF (UNC)");	imFormats.append(formatCount, FORMAT_GRAY_UNC);	++formatCount;
+						adapter.add("RAW12 .HUF v1");	imFormats.append(formatCount, FORMAT_RAW_HUFF_V1);	++formatCount;
+						adapter.add("RAW12 .HUF RVL");	imFormats.append(formatCount, FORMAT_RAW_HUFF_RVL);	++formatCount;
+						adapter.add("RAW12 .HUF UNC");	imFormats.append(formatCount, FORMAT_RAW_UNC);	++formatCount;
+						adapter.add("GRAY14 .HUF UNC");	imFormats.append(formatCount, FORMAT_GRAY_UNC);	++formatCount;
+						adapter.add("GRAY14 .HUF UNC DENOISE");imFormats.append(formatCount, FORMAT_GRAY_UNC_DENOISE);	++formatCount;
+						adapter.add("GRAY14 .HUF RVL DENOISE");imFormats.append(formatCount, FORMAT_GRAY_RVL_DENOISE);	++formatCount;
 					}
 					else if(supportsRaw10)
 					{
-						adapter.add("RAW10 .HUF (COMPR)");	imFormats.append(formatCount, FORMAT_RAW_HUFF);	++formatCount;
-						adapter.add("RAW10 .HUF (UNC)");	imFormats.append(formatCount, FORMAT_RAW_UNC);	++formatCount;
-						adapter.add("GRAY12 .HUF (UNC)");	imFormats.append(formatCount, FORMAT_GRAY_UNC);	++formatCount;
+						adapter.add("RAW10 .HUF v1");	imFormats.append(formatCount, FORMAT_RAW_HUFF_V1);	++formatCount;
+						adapter.add("RAW10 .HUF RVL");	imFormats.append(formatCount, FORMAT_RAW_HUFF_RVL);	++formatCount;
+						adapter.add("RAW10 .HUF UNC");	imFormats.append(formatCount, FORMAT_RAW_UNC);	++formatCount;
+						adapter.add("GRAY12 .HUF UNC");	imFormats.append(formatCount, FORMAT_GRAY_UNC);	++formatCount;
+						adapter.add("GRAY12 .HUF UNC DENOISE");imFormats.append(formatCount, FORMAT_GRAY_UNC_DENOISE);	++formatCount;
+						adapter.add("GRAY12 .HUF RVL DENOISE");imFormats.append(formatCount, FORMAT_GRAY_RVL_DENOISE);	++formatCount;
 					}
 				}
 				imFormatSpinner.setAdapter(adapter);
@@ -1850,7 +1908,7 @@ public class CameraFragment extends Fragment//https://www.youtube.com/playlist?l
 			cameraDevice=null;
 		}
 	}
-	@Override public void onRequestPermissionsResult(int requestCode, String[] permissions, int[] grantResults)
+	@Override public void onRequestPermissionsResult(int requestCode, @NonNull String[] permissions, @NonNull int[] grantResults)
 	{
 		super.onRequestPermissionsResult(requestCode, permissions, grantResults);
 		if(requestCode==CAMERA_REQUEST)
@@ -1862,7 +1920,7 @@ public class CameraFragment extends Fragment//https://www.youtube.com/playlist?l
 		}
 		else if(requestCode==STORAGE_REQUEST)
 		{
-			if(grantResults[0]!=PackageManager.PERMISSION_GRANTED)
+			if(Build.VERSION.SDK_INT>=Build.VERSION_CODES.M&&Build.VERSION.SDK_INT<Build.VERSION_CODES.R&&grantResults[0]!=PackageManager.PERMISSION_GRANTED)
 				displayRealToast(true, "Need permission for external storage to save media");
 			//else//
 			//	displayToast(false, "Storage permission granted");//
@@ -1965,7 +2023,8 @@ public class CameraFragment extends Fragment//https://www.youtube.com/playlist?l
 			case FORMAT_DNG:
 				extension=".dng";
 				break;
-			case FORMAT_RAW_HUFF:case FORMAT_RAW_UNC:case FORMAT_GRAY_UNC:
+			case FORMAT_RAW_HUFF_V1:case FORMAT_RAW_HUFF_RVL:
+			case FORMAT_RAW_UNC:case FORMAT_GRAY_UNC:case FORMAT_GRAY_UNC_DENOISE:case FORMAT_GRAY_RVL_DENOISE:
 				extension=".huf";
 				break;
 			}

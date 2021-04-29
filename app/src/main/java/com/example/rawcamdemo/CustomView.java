@@ -104,23 +104,41 @@ public class CustomView extends View//https://stackoverflow.com/questions/311734
 			case CameraFragment.FORMAT_DNG:				str=".DNG";break;
 			case CameraFragment.FORMAT_RAW_PREVIEW_JPEG:str="PREVIEW RAW .JPG";break;
 
-			case CameraFragment.FORMAT_RAW_HUFF:
+			case CameraFragment.FORMAT_RAW_HUFF_V1:
 				if(activity.supportsRaw12)
-					str="RAW12 .HUF (COMP)";
+					str="RAW12 .HUF v1";
 				else
-					str="RAW10 .HUF (COMP)";
+					str="RAW10 .HUF v1";
+				break;
+			case CameraFragment.FORMAT_RAW_HUFF_RVL:
+				if(activity.supportsRaw12)
+					str="RAW12 .HUF RVL";
+				else
+					str="RAW10 .HUF RVL";
 				break;
 			case CameraFragment.FORMAT_RAW_UNC:
 				if(activity.supportsRaw12)
-					str="RAW12 .HUF (UNC)";
+					str="RAW12 .HUF UNC";
 				else
-					str="RAW10 .HUF (UNC)";
+					str="RAW10 .HUF UNC";
 				break;
 			case CameraFragment.FORMAT_GRAY_UNC:
 				if(activity.supportsRaw12)
-					str="GRAY14 .HUF (UNC)";
+					str="GRAY14 .HUF UNC";
 				else
-					str="GRAY12 .HUF (UNC)";
+					str="GRAY12 .HUF UNC";
+				break;
+			case CameraFragment.FORMAT_GRAY_UNC_DENOISE:
+				if(activity.supportsRaw12)
+					str="GRAY14 .HUF UNC DENOISE";
+				else
+					str="GRAY12 .HUF UNC DENOISE";
+				break;
+			case CameraFragment.FORMAT_GRAY_RVL_DENOISE:
+				if(activity.supportsRaw12)
+					str="GRAY14 .HUF RVL DENOISE";
+				else
+					str="GRAY12 .HUF RVL DENOISE";
 				break;
 			}
 		/*	switch(activity.selectedImFormat)
