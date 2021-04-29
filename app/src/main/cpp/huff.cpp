@@ -375,6 +375,30 @@ short*			bayer2gray(const short *src, int width, int height)//pass new (half) di
 	return dst;
 }
 
+short*			separateBayer(const short *src, int width, int height)
+{
+	int w2=width>>1, h2=height>>1;
+	int imsize=width*height;
+	auto dst=new short[imsize];
+	for(int ky=0;ky<height;++ky)
+	{
+		int iy2=ky>=h2;
+		int ky0=ky-(h2&-iy2);
+		ky0=ky0<<1|iy2;
+
+		const short *srow=src+width*ky0;
+		short *drow=dst+width*ky;
+		for(int kx=0;kx<width;++kx)
+		{
+			int ix2=kx>=w2;
+			int kx0=kx-(w2&-ix2);
+			kx0=kx0<<1|ix2;
+			drow[kx]=srow[kx0];
+		}
+	}
+	return dst;
+}
+
 inline void 	denoise_laplace4(short *buffer, int bw, int bh, int w2, int x, int y, int threshold)
 {
 	int idx=bw*y+x;
@@ -1149,10 +1173,14 @@ namespace		huff
 				}
 				bayer=0;
 			}
-			b2=temp;
 		}
 		else//raw color
-			width=bw, height=bh, imSize=width*height, b2=buffer;
+		{
+			width=bw, height=bh, imSize=width*height;
+			temp=separateBayer(buffer, bw, bh);
+			time_mark("separateBayer");
+		}
+		b2=temp;
 
 		int nLevels=1<<depth;
 		data.reserve(hSize+(imSize>>1));
@@ -1641,11 +1669,17 @@ namespace		huff
 		{
 			int *bits=(int*)header->histogram;
 			int bitidx=0;
-			for(int ky=0;ky<header->height;++ky)
+			short *d2=nullptr;
+			int interleave=*(int*)header->bayerInfo!=0&&*(int*)header->bayerInfo!=1;
+			if(interleave)
+				d2=new short[imSize];
+			else
+				d2=dst;
+			for(int ky=0;ky<(int)header->height;++ky)
 			{
 				int prev=0;
-				auto row=dst+header->width*ky;
-				for(int kx=0;kx<header->width;++kx)
+				auto row=d2+header->width*ky;
+				for(int kx=0;kx<(int)header->width;++kx)
 				{
 					int symbol=0;
 					int code, bitlen=0;
@@ -1666,6 +1700,30 @@ namespace		huff
 				}
 			}
 			time_mark("decode RVL");
+
+			if(interleave)
+			{
+				int w2=header->width>>1, h2=header->height>>1;
+				for(int ky=0;ky<(int)header->height;++ky)
+				{
+					int iy2=ky>=h2;
+					int ky0=ky-(h2&-iy2);
+					ky0=ky0<<1|iy2;
+
+					const short *srow=d2+header->width*ky;
+					short *drow=dst+header->width*ky0;
+					for(int kx=0;kx<(int)header->width;++kx)
+					{
+						int ix2=kx>=w2;
+						int kx0=kx-(w2&-ix2);
+						kx0=kx0<<1|ix2;
+						drow[kx0]=srow[kx];
+					}
+				}
+				time_mark("interleave Bayer channels");
+				delete[] d2;
+				time_mark("cleanup");
+			}
 		}
 		else if(header->version==10)//uncompressed raw10
 		{
