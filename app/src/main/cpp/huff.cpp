@@ -1,3 +1,19 @@
+//huff.cpp - implementation of .huf codec used by RawCam Android app
+//Copyright (C) 2022  Ayman Wagih Mohsen
+//
+//This program is free software: you can redistribute it and/or modify
+//it under the terms of the GNU General Public License as published by
+//the Free Software Foundation, either version 3 of the License, or
+//(at your option) any later version.
+//
+//This program is distributed in the hope that it will be useful,
+//but WITHOUT ANY WARRANTY; without even the implied warranty of
+//MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
+//GNU General Public License for more details.
+//
+//You should have received a copy of the GNU General Public License
+//along with this program.  If not, see <https://www.gnu.org/licenses/>.
+
 #include		"huff.h"
 #include		"vector_bool.h"
 #ifdef			__ANDROID__
@@ -34,6 +50,12 @@ inline void		shift_left_vector_small(__m128i const &x, int n, __m128i &ret_lo, _
 #include		<stack>
 
 
+//	#define		DEBUG_ANS
+//	#define		ANS_PRINT_STATE2	kc==15
+//	#define		ANS_PRINT_EMITS		kc==15
+//	#define		ANS_PRINT_READS		kc==15
+
+//	#define		PRINT_MINMAX
 //	#define		DEBUG_VEC_BOOL
 //	#define		PRINT_TREE
 //	#define		PRINT_ALPHABET
@@ -223,7 +245,7 @@ static std::vector<Node> tree;//root is at the end of array
 static int		nLevels;
 static int		make_node(int symbol, int freq, int left, int right)//https://gist.github.com/pwxcoo/72d7d3c5c3698371c21e486722f9b34b
 {
-	int idx=tree.size();
+	int idx=(int)tree.size();
 	tree.push_back(Node());
 	auto &n=*tree.rbegin();
 	n.value=symbol, n.freq=freq;
@@ -242,7 +264,7 @@ struct			compare_nodes
 
 static void		print_tree()
 {
-	for(int k=tree.size()-1;k>=0;--k)
+	for(int k=(int)tree.size()-1;k>=0;--k)
 	{
 		auto &node=tree[k];
 		if(!node.freq)
@@ -271,7 +293,7 @@ static void		make_alphabet(std::vector<vector_bool> &alphabet)
 	alphabet.resize(nLevels);
 	typedef std::pair<int, vector_bool> TraverseInfo;
 	std::stack<TraverseInfo> s;
-	s.push(TraverseInfo(tree.size()-1, vector_bool()));
+	s.push(TraverseInfo((int)tree.size()-1, vector_bool()));
 	vector_bool left, right;
 	while(s.size())//depth-first
 	{
@@ -311,7 +333,7 @@ static void		calculate_histogram(const short *image, int size, int *histogram, i
 		++histogram[image[k]];
 }
 
-short*			unpack_r10(const byte* src, int width, int height)
+short*			unpack_r10(const byte *src, int width, int height)
 {
 	int imSize=width*height;
 	auto dst=new short[imSize];
@@ -345,7 +367,7 @@ short*			unpack_r10_simd(const byte* src, int width, int height)
 	return dst;
 }
 #endif
-short*			unpack_r12(const byte* src, int width, int height)
+short*			unpack_r12(const byte *src, int width, int height)
 {
 	int imSize=width*height;
 	auto dst=new short[imSize];
@@ -720,6 +742,536 @@ void			denoise_bayer_simd(short *buffer, int bw, int bh, int depth)
 	}
 #endif
 }
+
+
+//ANS
+#ifdef			DEBUG_ANS
+const int iw=8, ih=8, imsize=iw*ih;
+float			guide[imsize]={};
+float			buffer[imsize]=
+{
+	0, 0, 1, 1, 2, 2, 3, 3,
+	0, 0, 1, 1, 2, 2, 3, 3,
+	4, 4, 5, 5, 6, 6, 7, 7,
+	4, 4, 5, 5, 6, 6, 7, 7,
+	0, 0, 1, 1, 2, 2, 3, 3,
+	0, 0, 1, 1, 2, 2, 3, 3,
+	4, 4, 5, 5, 6, 6, 7, 7,
+	4, 4, 5, 5, 6, 6, 7, 7,
+
+	//0, 1, 2, 3, 4, 5, 6, 7,
+	//0, 1, 2, 3, 4, 5, 6, 7,
+	//0, 1, 2, 3, 4, 5, 6, 7,
+	//0, 1, 2, 3, 4, 5, 6, 7,
+	//0, 1, 2, 3, 4, 5, 6, 7,
+	//0, 1, 2, 3, 4, 5, 6, 7,
+	//0, 1, 2, 3, 4, 5, 6, 7,
+	//0, 1, 2, 3, 4, 5, 6, 7,
+};
+#endif
+#define 		PROF(...)
+#ifdef __ANDROID__
+#define 		sprintf_s	snprintf
+#define 		vsprintf_s	vsnprintf
+int				error_count=0;
+int				ceil_log2(unsigned long long n)
+{
+	int l2=floor_log2(n);
+	l2+=(1ULL<<l2)<n;
+	return l2;
+}
+static bool		set_error(const char *file, int line, const char *format, ...)
+{
+	int printed=0;
+	printed+=sprintf_s(g_buf+printed, g_buf_size-printed, "[%d] %s(%d) ", error_count, file, line);
+	if(format)
+	{
+		va_list args;
+		va_start(args, format);
+		printed+=vsprintf_s(g_buf+printed, g_buf_size-printed, format, args);
+		va_end(args);
+	}
+	else
+		sprintf_s(g_buf+printed, g_buf_size-printed, "Unknown error");
+
+	LOGE("%s", g_buf);
+	++error_count;
+	return false;
+}
+#define			FAIL(REASON, ...)	return set_error(__FILE__, __LINE__, REASON, ##__VA_ARGS__)
+#else
+#define			FAIL(REASON, ...)	return (log_error(file, __LINE__, REASON, ##__VA_ARGS__), false)
+#endif
+const int		magic_an04='A'|'N'<<8|'0'<<16|'4'<<24;
+const int
+	ANS_PROB_BITS=16,//CHANNEL DEPTH <= 15
+	ANS_L=1<<16,
+	ANS_DEPTH=8,
+	ANS_NLEVELS=1<<ANS_DEPTH;
+struct			SortedHistInfo
+{
+	int idx,//symbol
+		freq,//original freq
+		qfreq;//quantized freq
+	SortedHistInfo():idx(0), freq(0), qfreq(0){}
+};
+struct			SymbolInfo
+{
+	unsigned short
+		freq,//quantized
+		cmpl_freq,
+		shift,
+		reserved0;
+	unsigned
+		CDF,
+		inv_freq,
+		bias,
+		renorm_limit;
+};
+inline bool		emit_pad(unsigned char *&out_data, const unsigned long long &out_size, unsigned long long &out_cap, int size)
+{
+	while(out_size+size>=out_cap)
+	{
+		auto newcap=out_cap?out_cap<<1:1;
+		auto ptr=(unsigned char*)realloc(out_data, newcap);
+		if(!ptr)
+			FAIL("realloc null emit_pad %lld %lld", out_cap, newcap);
+		out_data=ptr, out_cap=newcap;
+	}
+	memset(out_data+out_size, 0, size);
+	return true;
+}
+inline void		store_int_le(unsigned char *base, unsigned long long &offset, int i)
+{
+	auto p=(unsigned char*)&i;
+	base[offset  ]=p[0];
+	base[offset+1]=p[1];
+	base[offset+2]=p[2];
+	base[offset+3]=p[3];
+	offset+=4;
+}
+inline bool		emit_short_le(unsigned char *&dst, unsigned long long &dst_size, unsigned long long &dst_cap, unsigned short i)
+{
+	if(dst_size>=dst_cap)
+	{
+		auto newcap=dst_cap<<1;
+		newcap+=!newcap<<1;
+		auto ptr=(unsigned char*)realloc(dst, newcap);
+		if(!ptr)
+			FAIL("realloc null emit_short_le %lld %lld", dst_cap, newcap);
+		dst=ptr, dst_cap=newcap;
+	}
+	*(unsigned short*)(dst+dst_size)=i;//assume all encoded data is 2 byte-aligned
+	dst_size+=2;
+	return true;
+}
+inline int		load_int_le(const unsigned char *buffer)
+{
+	int i=0;
+	auto p=(unsigned char*)&i;
+	p[0]=buffer[0];
+	p[1]=buffer[1];
+	p[2]=buffer[2];
+	p[3]=buffer[3];
+	return i;
+}
+static SortedHistInfo h[ANS_NLEVELS];
+int				ans_calc_histogram(const unsigned char *buffer, int nsymbols, int bytestride, unsigned short *histogram, int prob_bits, int integrate)
+{
+	int prob_sum=1<<prob_bits;
+	if(!nsymbols)
+	{
+		memset(histogram, 0, ANS_NLEVELS*sizeof(*histogram));
+		FAIL("Symbol count is zero");
+	}
+	for(int k=0;k<ANS_NLEVELS;++k)
+	{
+		h[k].idx=k;
+		h[k].freq=0;
+	}
+	int bytesize=nsymbols*bytestride;
+	PROF(HISTOGRAM_INIT);
+	for(int k=0;k<bytesize;k+=bytestride)//this loop takes 73% of encode time
+		++h[buffer[k]].freq;
+	PROF(HISTOGRAM_LOOKUP);
+	for(int k=0;k<ANS_NLEVELS;++k)
+		h[k].qfreq=(((long long)h[k].freq<<ANS_PROB_BITS)/nsymbols);
+
+	if(nsymbols!=prob_sum)
+	{
+		const int prob_max=prob_sum-1;
+
+		std::sort(h, h+ANS_NLEVELS, [](SortedHistInfo const &a, SortedHistInfo const &b)
+		{
+			return a.freq<b.freq;
+		});
+		int idx=0;
+		for(;idx<ANS_NLEVELS&&!h[idx].freq;++idx);
+		for(;idx<ANS_NLEVELS&&!h[idx].qfreq;++idx)
+			++h[idx].qfreq;
+		for(idx=ANS_NLEVELS-1;idx>=0&&h[idx].qfreq>=prob_max;--idx);
+		for(++idx;idx<ANS_NLEVELS;++idx)
+			h[idx].qfreq=prob_max;
+
+		int error=-prob_sum;//too much -> +ve error & vice versa
+		for(int k=0;k<ANS_NLEVELS;++k)
+			error+=h[k].qfreq;
+		if(error>0)
+		{
+			while(error)
+			{
+				for(int k=0;k<ANS_NLEVELS&&error;++k)
+				{
+					int dec=h[k].qfreq>1;
+					h[k].qfreq-=dec, error-=dec;
+				}
+			}
+		}
+		else
+		{
+			while(error)
+			{
+				for(int k=ANS_NLEVELS-1;k>=0&&error;--k)
+				{
+					int inc=h[k].qfreq<prob_max;
+					h[k].qfreq+=inc, error+=inc;
+				}
+			}
+		}
+		if(error)
+			FAIL("Internal error: histogram adds up to %d != %d", prob_sum+error, prob_sum);
+		std::sort(h, h+ANS_NLEVELS, [](SortedHistInfo const &a, SortedHistInfo const &b)
+		{
+			return a.idx<b.idx;
+		});
+	}
+	int sum=0;
+	for(int k=0;k<ANS_NLEVELS;++k)
+	{
+		if(h[k].qfreq>0xFFFF)
+			FAIL("Internal error: symbol %d has probability %d", k, h[k].qfreq);
+		histogram[k]=integrate?sum:h[k].qfreq;
+		sum+=h[k].qfreq;
+	}
+	if(sum!=ANS_L)
+		FAIL("Internal error: CDF ends with 0x%08X, should end with 0x%08X", sum, ANS_L);
+	return true;
+}
+bool			rans4_prep(const void *hist_ptr, int bytespersymbol, SymbolInfo *&info, unsigned char *&CDF2sym, int loud)
+{
+	int tempsize=bytespersymbol*(ANS_NLEVELS*sizeof(SymbolInfo)+ANS_L);
+	info=(SymbolInfo*)malloc(tempsize);
+	if(!info)
+		FAIL("Failed to allocate temp buffer");
+	CDF2sym=(unsigned char*)info+bytespersymbol*ANS_NLEVELS*sizeof(SymbolInfo);
+	for(int kc=0;kc<bytespersymbol;++kc)
+	{
+		auto c_histogram=(const unsigned short*)hist_ptr+(kc<<ANS_DEPTH);
+		auto c_info=info+(kc<<ANS_DEPTH);
+		auto c_CDF2sym=CDF2sym+(kc<<ANS_PROB_BITS);
+		int sum=0;
+		for(int k=0;k<ANS_NLEVELS;++k)
+		{
+			auto &si=c_info[k];
+			si.freq=c_histogram[k];
+			si.cmpl_freq=~si.freq;
+			si.CDF=sum;
+			si.reserved0=0;
+
+			if(si.freq<2)//0 freq: don't care, 1 freq:		//Ryg's fast rANS encoder
+			{
+				si.shift=0;
+				si.inv_freq=0xFFFFFFFF;
+				si.bias=si.CDF+ANS_L-1;
+			}
+			else
+			{
+				si.shift=ceil_log2(c_histogram[k])-1;
+				si.inv_freq=(unsigned)(((0x100000000ULL<<si.shift)+c_histogram[k]-1)/c_histogram[k]);
+				si.bias=si.CDF;
+			}
+
+			si.renorm_limit=si.freq<<(32-ANS_PROB_BITS);
+
+			if(CDF2sym&&k)
+			{
+				for(int k2=c_info[k-1].CDF;k2<(int)si.CDF;++k2)
+					c_CDF2sym[k2]=k-1;
+			}
+			sum+=si.freq;
+		}
+		if(CDF2sym)
+		{
+			for(int k2=c_info[ANS_NLEVELS-1].CDF;k2<ANS_L;++k2)
+				c_CDF2sym[k2]=ANS_NLEVELS-1;
+		}
+		if(sum!=ANS_L)
+			FAIL("histogram sum = %d != %d", sum, ANS_L);
+		if(loud)
+		{
+#ifdef ANS_PRINT_HISTOGRAM
+			static int printed=0;
+			if(printed<1)
+			{
+				printf("s\tf\tCDF\n");
+				for(int k=0;k<ANS_NLEVELS;++k)
+				{
+					auto &si=c_info[k];
+					if(c_histogram[k])
+						printf("%3d\t%5d = %04X\t%04X\n", k, c_histogram[k], c_histogram[k], si.CDF);
+				}
+				++printed;
+			}
+#endif
+		}
+	}
+	//	if(!calc_hist_derivaties((const unsigned short*)hist_ptr+kc*ANS_NLEVELS, info+(kc<<ANS_DEPTH), CDF2sym+ANS_L*kc, loud))
+	//		return false;
+	return true;
+}
+int				rans4_encode(void *src, int nsymbols, int bytespersymbol, unsigned char *&dst, unsigned long long &dst_size, unsigned long long &dst_cap, int loud)//bytespersymbol: up to 16
+{
+	PROF(WASTE);
+	auto buffer=(const unsigned char*)src;
+	auto dst_start=dst_size;
+	int headersize=8+bytespersymbol*ANS_NLEVELS*sizeof(short);
+	emit_pad(dst, dst_size, dst_cap, headersize);
+	dst_size+=headersize;
+	auto temp=dst_start;
+	store_int_le(dst, temp, magic_an04);
+	for(int kc=0;kc<bytespersymbol;++kc)
+		if(!ans_calc_histogram(buffer+kc, nsymbols, bytespersymbol, (unsigned short*)(dst+dst_start+8+kc*(ANS_NLEVELS*sizeof(short))), 16, false))
+			return false;
+
+	//printf("idx = %lld\n", dst_start+8);//
+	SymbolInfo *info=nullptr;
+	unsigned char *CDF2sym=nullptr;
+	if(!rans4_prep(dst+dst_start+8, bytespersymbol, info, CDF2sym, loud))
+		return false;
+
+	unsigned state[16]={};
+	for(int kc=0;kc<bytespersymbol;++kc)
+		state[kc]=0x00010000;
+	int framebytes=nsymbols*bytespersymbol;
+	auto srcptr=buffer;
+	PROF(PREP);
+	for(int ks=0;ks<framebytes;++ks)
+	{
+		//if(ks>=(framebytes>>1))//
+		//	break;//
+		if(srcptr>=(const unsigned char*)src+framebytes)
+			FAIL("ks %d srcptr is OOB", ks);
+		int kc=ks%bytespersymbol;
+#ifdef ANS_PRINT_STATE
+		unsigned s0=state[kc];//
+#endif
+		auto s=*srcptr;
+		++srcptr;
+		auto &si=info[kc<<ANS_DEPTH|s];
+		PROF(FETCH);
+
+		if(!si.freq)
+			FAIL("k %d s 0x%02X has zero freq", ks, s);
+
+		auto &x=state[kc];
+		if(x>=si.renorm_limit)//renormalize
+	//	if(state>=(unsigned)(si.freq<<(32-ANS_PROB_BITS)))
+		{
+			if(!emit_short_le(dst, dst_size, dst_cap, (unsigned short)x))
+				return false;
+#ifdef ANS_PRINT_EMITS
+			if(ANS_PRINT_EMITS)
+				printf("kc %d k %d emit %04X[%04X] size %lld\n", kc, ks/bytespersymbol, x>>16, (int)(unsigned short)x, dst_size);
+#endif
+			x>>=16;
+		}
+		PROF(RENORM);
+#ifdef ANS_PRINT_STATE2
+		if(ANS_PRINT_STATE2)
+			printf("kc %d k %d x %08X->%08X freq %04X CDF %04X s %02X\n", kc, ks/bytespersymbol, x, (x/si.freq<<ANS_PROB_BITS)+x%si.freq+si.CDF, si.freq, si.CDF, s);
+			//printf("enc: 0x%08X = 0x%08X+(0x%08X*0x%08X>>(32+%d))*0x%04X+0x%08X\n", x+((unsigned)((long long)x*si.inv_freq>>32)>>si.shift)*si.cmpl_freq+si.bias, x, x, si.inv_freq, si.shift, si.cmpl_freq, si.bias);
+#endif
+#ifdef ANS_ENC_DIV_FREE
+		x+=(((long long)x*si.inv_freq>>32)>>si.shift)*si.cmpl_freq+si.bias;//Ryg's division-free rANS encoder	https://github.com/rygorous/ryg_rans/blob/master/rans_byte.h
+#else
+		x=(x/si.freq<<ANS_PROB_BITS)+x%si.freq+si.CDF;
+
+	//	lldiv_t result=lldiv(x, si.freq);//because unsigned
+	//	x=((result.quot<<ANS_PROB_BITS)|result.rem)+si.CDF;
+#endif
+		PROF(UPDATE);
+		//if(!rans_encode(srcptr, dst, dst_size, dst_cap, x[kc], info+(kc<<ANS_DEPTH)))
+		//{
+		//	free(info);
+		//	return false;
+		//}
+#ifdef ANS_PRINT_STATE
+		printf("kc %d s=%02X x=%08X->%08X\n", kc, srcptr[-1]&0xFF, s0, x[kc]);//
+#endif
+	}
+	for(int kc=0;kc<bytespersymbol;++kc)
+	{
+		if(!emit_short_le(dst, dst_size, dst_cap, (unsigned short)state[kc]))
+			return false;
+		if(!emit_short_le(dst, dst_size, dst_cap, (unsigned short)(state[kc]>>16)))
+			return false;
+#ifdef ANS_PRINT_EMITS
+		if(ANS_PRINT_EMITS)
+			printf("kc %d emit [%08X] size %lld\n", kc, state[kc], dst_size);
+#endif
+		//if(!rans_encode_finish(dst, dst_size, dst_cap, state[kc]))
+		//{
+		//	free(info);
+		//	return false;
+		//}
+	}
+	int csize=(int)(dst_size-dst_start);
+	dst_start+=4;
+	store_int_le(dst, dst_start, csize);
+	//printf("\nenc csize=%d\n", csize);//
+	free(info);
+#ifdef __ANDROID__
+	free(src);//CRASHES when freeing temp where it was allocated
+#endif
+	return true;
+}
+int				rans4_decode(const unsigned char *src, unsigned long long &src_idx, unsigned long long src_size, void *dst, int nsymbols, int bytespersymbol, int loud)
+{
+	PROF(WASTE);
+	int tag=load_int_le(src+src_idx);
+	if(tag!=magic_an04)
+		FAIL("Lost at %lld: found 0x%08X, magic = 0x%08X", src_idx, tag, magic_an04);
+	auto hist=(unsigned short*)(src+src_idx+8);
+
+	//printf("idx = %lld\n", src_idx+8);//
+	SymbolInfo *info=nullptr;
+	unsigned char *CDF2sym=nullptr;
+	if(!rans4_prep(hist, bytespersymbol, info, CDF2sym, loud))
+		return false;
+
+	unsigned state[16]={};
+	const unsigned char *srcptr=nullptr;
+	unsigned char *dstptr=nullptr;
+	int headersize=8+bytespersymbol*ANS_NLEVELS*sizeof(short);
+	auto src_start=src+src_idx+headersize;
+	int csize=load_int_le(src+src_idx+4);
+	//printf("\ndec csize=%d\n", csize);//
+	int framebytes=nsymbols*bytespersymbol;
+	if(src_start)
+		srcptr=src+src_idx+csize;
+	if((unsigned char*)dst)
+		dstptr=(unsigned char*)dst+framebytes;
+	for(int kc=bytespersymbol-1;kc>=0;--kc)
+	{
+		srcptr-=2, state[kc]=*(const unsigned short*)srcptr;
+		srcptr-=2, state[kc]=state[kc]<<16|*(const unsigned short*)srcptr;
+#ifdef ANS_PRINT_READS
+		if(ANS_PRINT_READS)
+			printf("kc %d read [%08X]\n", kc, state[kc]);
+#endif
+	}
+	PROF(PREP);
+	for(int ks=framebytes-1;ks>=0;--ks)
+	{
+		if(dstptr<dst)
+			FAIL("dstptr is out of bounds: ks=%d, frame = %d bytes,\ndstptr=%p, start=%p", ks, framebytes, dstptr, dst);
+		int kc=ks%bytespersymbol;
+#ifdef ANS_PRINT_STATE
+		unsigned s0=state[kc];//
+#endif
+		auto &x=state[kc];
+		auto c=(unsigned short)x;
+	//	int c=x&(ANS_L-1);
+		auto s=CDF2sym[kc<<ANS_PROB_BITS|c];
+		auto &si=info[kc<<ANS_DEPTH|s];
+		if(!si.freq)
+			FAIL("Symbol 0x%02X has zero frequency", s);
+
+		--dstptr;
+		*dstptr=s;
+		PROF(FETCH);
+#ifdef ANS_PRINT_STATE2
+		if(ANS_PRINT_STATE2)
+			printf("kc %d k %d x %08X->%08X freq %04X CDF %04X s %02X\n", kc, ks/bytespersymbol, x, si.freq*(x>>ANS_PROB_BITS)+c-si.CDF, si.freq, si.CDF, s);
+			//printf("kc %d k %d x %08X->%08X freq %04X CDF %04X s %02X s0 %02X\n", kc, ks/bytespersymbol, x, si.freq*(x>>ANS_PROB_BITS)+c-si.CDF, si.freq, si.CDF, s, ((unsigned char*)guide)[ks]&0xFF);
+			//printf("dec: 0x%08X = 0x%04X*(0x%08X>>%d)+0x%04X-0x%08X\n", si.freq*(x>>ANS_PROB_BITS)+c-si.CDF, (int)si.freq, x, ANS_PROB_BITS, c, si.CDF);
+#endif
+		x=si.freq*(x>>ANS_PROB_BITS)+c-si.CDF;
+		PROF(UPDATE);
+
+		if(x<ANS_L)
+		{
+#ifdef ANS_PRINT_READS
+			if(ANS_PRINT_READS)
+				printf("kc %d read %08X[%04X]\n", kc, x, *(const unsigned short*)srcptr);
+#endif
+			srcptr-=2, x=x<<16|*(const unsigned short*)srcptr;
+		}
+		PROF(RENORM);
+		//if(!rans_decode(srcptr, dstptr, x[kc], info+(kc<<ANS_DEPTH), CDF2sym+(kc<<ANS_PROB_BITS)))
+		//{
+		//	free(info);
+		//	return false;
+		//}
+		if(srcptr<src_start)
+			FAIL("srcptr < start: ks=%d, frame = %d bytes, s = 0x%02X,\nsrcptr=%p, start=%p", ks, framebytes, *dstptr, srcptr, src_start);
+#ifdef ANS_PRINT_STATE
+		printf("kc %d s=%02X x=%08X->%08X\n", kc, *dstptr&0xFF, s0, x[kc]);//
+#endif
+#ifdef DEBUG_ANS
+		if(guide&&((unsigned char*)guide)[ks]!=*dstptr)
+			FAIL("Decode error at byte %d/%d kc %d: decoded 0x%02X != original 0x%02X", ks, framebytes, kc, *dstptr&0xFF, ((unsigned char*)guide)[ks]&0xFF);
+#endif
+	}
+
+	src_idx+=csize;
+	free(info);
+	return true;
+}
+
+#ifdef DEBUG_ANS
+void			debug_test()
+{
+	console_start();
+	unsigned char *dst=nullptr;
+	unsigned long long dst_size=0, dst_cap=0;
+//	guide=buffer;
+	int nFrames=1, depth=1;
+	huff::compress_v7(buffer, iw, ih, 0, depth, nFrames, dst, dst_size, dst_cap);
+
+	float gain=1/(float)(((1<<depth)-1)*nFrames);
+	for(int ky=0, kd=0;ky<ih;ky+=2)//interleave Bayer channels
+	{
+		auto row=buffer+iw*ky;
+		for(int kx=0;kx<iw;kx+=2, kd+=4)
+		{
+			guide[kd  ]=row[kx]*gain;
+			guide[kd+1]=row[kx+1]*gain;
+			guide[kd+2]=row[kx+iw]*gain;
+			guide[kd+3]=row[kx+iw+1]*gain;
+		}
+	}
+	//for(int k=0;k<dst_size;++k)
+	//	printf("%02X-", dst[k]);
+
+	float *b2=nullptr;
+	int bw=0, bh=0;
+	char bayer[4]={};
+	huff::decompress(dst, dst_size, RF_F32_BAYER, (void**)&b2, bw, bh, depth, bayer);
+
+	for(int k=imsize-1;k>=0;--k)
+	{
+		if(b2[k]!=buffer[k])
+		{
+			printf("Error at %d: %f!=%f, %08X!=%08X", k, b2[k], buffer[k], (int&)b2[k], (int&)buffer[k]);
+			break;
+		}
+	}
+	console_end();
+	exit(0);
+}
+#endif
+
 namespace		huff
 {
 	int			compress(const short *buffer, int bw, int bh, int depth, int bayer, std::vector<int> &data)
@@ -862,7 +1414,7 @@ namespace		huff
 		bits.debug_print(0);
 		print_flush();
 #endif
-		int data_start=data.size();
+		int data_start=(int)data.size();
 		data.resize(data_start+sizeof(HuffDataHeader)+bits.size_bytes()/sizeof(int));
 		auto dataHeader=(HuffDataHeader*)(data.data()+data_start);
 		*(int*)dataHeader->DATA='D'|'A'<<8|'T'<<16|'A'<<24;
@@ -983,9 +1535,9 @@ namespace		huff
 #endif
 
 		header->version=2+code_id;
-		int intsize=bitsize[code_id];
+		int intsize=(int)bitsize[code_id];
 		intsize=(intsize>>5)+((intsize&31)!=0);
-		int data_idx=data.size();
+		int data_idx=(int)data.size();
 		data.resize(data_idx+sizeof(HuffDataHeader)/sizeof(int)+intsize+1);//header invalidated
 		auto hData=(HuffDataHeader*)(data.data()+data_idx);
 		*(int*)hData->DATA='D'|'A'<<8|'T'<<16|'A'<<24;
@@ -1141,6 +1693,7 @@ namespace		huff
 #endif
 
 		delete[] histogram;
+		delete[] invP;
 		time_mark("cleanup");
 		return data_idx;
 	}
@@ -1240,12 +1793,12 @@ namespace		huff
 #endif
 		data.resize(hSize+(bitidx>>5)+((bitidx&31)!=0));
 		time_mark("resize");
-		if(bayer==0||bayer==1)
-		{
+		//if(bayer==0||bayer==1)
+		//{
 			delete[] temp;
 			b2=buffer;
 			time_mark("delete[] temp");
-		}
+		//}
 		return sizeof(HuffHeader)/sizeof(int);
 	}
 	int			pack_raw(const byte *buffer, int bw, int bh, int depth, int bayer, std::vector<int> &data)
@@ -1442,8 +1995,99 @@ namespace		huff
 		}
 		return sizeof(HuffHeader)/sizeof(int);
 	}
+	int			compress_v7(const float *buffer, int bw, int bh, int bayer, int depth, int nFrames, unsigned char *&dst, unsigned long long &dst_size, unsigned long long &dst_cap)
+	{
+		time_start();
+		checkSIMD();
+
+		int imSize=bw*bh;
+		auto temp=(float*)malloc(imSize*sizeof(float));
+
+		float gain=1/(float)(((1<<depth)-1)*nFrames);
+	//	float gain=255/(float)nFrames;//0~255 for better utilization of precision
+#ifdef PRINT_MINMAX
+		float vmin=0, vmax=0;//
+#endif
+		for(int ky=0, kd=0;ky<bh;ky+=2)//interleave Bayer channels
+		{
+			auto row=buffer+bw*ky;
+			for(int kx=0;kx<bw;kx+=2, kd+=4)
+			{
+				temp[kd  ]=row[kx]*gain;
+				temp[kd+1]=row[kx+1]*gain;
+				temp[kd+2]=row[kx+bw]*gain;
+				temp[kd+3]=row[kx+bw+1]*gain;
+#ifdef PRINT_MINMAX
+				if(!ky&&!kx)
+					vmin=vmax=temp[kd];
+				if(vmin>temp[kd])
+					vmin=temp[kd];
+				if(vmax<temp[kd])
+					vmax=temp[kd];
+				if(vmin>temp[kd+1])
+					vmin=temp[kd+1];
+				if(vmax<temp[kd+1])
+					vmax=temp[kd+1];
+				if(vmin>temp[kd+2])
+					vmin=temp[kd+2];
+				if(vmax<temp[kd+2])
+					vmax=temp[kd+2];
+				if(vmin>temp[kd+3])
+					vmin=temp[kd+3];
+				if(vmax<temp[kd+3])
+					vmax=temp[kd+3];
+#endif
+			}
+		}
+#ifdef PRINT_MINMAX
+		LOGE("%f~%f", vmin, vmax);
+#endif
+#ifdef DEBUG_ANS
+		unsigned chidx[]={0x03020100, 0x07060504, 0x0B0A0908, 0x0F0E0D0C};
+		printf("    %08X-%08X-%08X-%08X\n", chidx[0], chidx[1], chidx[2], chidx[3]);
+		for(int k=0;k<imSize;k+=4)
+			printf("[%d] %08X-%08X-%08X-%08X-\n", k/4, (int&)temp[k], (int&)temp[k+1], (int&)temp[k+2], (int&)temp[k+3]);
+#endif
+		//for(int kcy=0, kd=0;kcy<2;++kcy)//separate the Bayer matrix
+		//{
+		//	for(int kcx=0;kcx<2;++kcx)
+		//	{
+		//		for(int ky=kcy;ky<bh;ky+=2)
+		//		{
+		//			auto row=buffer+bw*ky;
+		//			for(int kx=kcx;kx<bw;kx+=2, ++kd)
+		//				temp[kd]=row[kx]*gain;
+		//		}
+		//	}
+		//}
+		time_mark("interleave & gain");
+
+		emit_pad(dst, dst_size, dst_cap, sizeof(HuffHeader));
+		auto header=(HuffHeader*)(dst+dst_size);
+		*(int*)header->HUFF='H'|'U'<<8|'F'<<16|'F'<<24;
+		header->version=7;//ACC-ANS
+		header->width=bw>>1;	//image size = header->width * header->height * 4*sizeof(float) bytes
+		header->height=bh>>1;
+		*(int*)header->bayerInfo=bayer;
+		header->nLevels=1<<depth;
+		//header->nLevels=4*sizeof(float);//bytespersymbol
+		dst_size+=sizeof(HuffHeader);
+		time_mark("header");
+		rans4_encode(temp, imSize/4, 4*sizeof(float), dst, dst_size, dst_cap, false);
+		time_mark("rANS_enc");
+#ifndef __ANDROID__
+		free(temp);//CRASHES when freeing temp where it was allocated
+#endif
+		return (int)dst_size;
+	}
 	bool		decompress(const byte *data, int bytesize, RequestedFormat format, void **pbuffer, int &bw, int &bh, int &depth, char *bayer_sh)//realloc will be used on buffer
 	{
+//#ifdef DEBUG_ANS
+//		static int callcount=0;
+//		++callcount;
+//		if(callcount==1)
+//			debug_test();
+//#endif
 		time_start();
 		checkSIMD();
 #ifdef DEBUG_ARCH
@@ -1453,7 +2097,7 @@ namespace		huff
 		auto header=(HuffHeader const*)data;
 		if(*(int*)header->HUFF!=('H'|'U'<<8|'F'<<16|'F'<<24)||header->nLevels>(1<<16))
 		{
-			LOG_ERROR("Invalid file tag: %c%c%c%c, ver: %d, w=%d, h=%d", header->HUFF[0], header->HUFF[1], header->HUFF[2], header->HUFF[3], header->version, header->width, header->height);
+			LOG_ERROR("Invalid file tag: %.4s, ver: %d, w=%d, h=%d", header->HUFF, header->version, header->width, header->height);
 #ifdef DEBUG_ARCH
 			console_pause();
 			console_end();
@@ -1484,9 +2128,11 @@ namespace		huff
 		else
 			memset(bayer_sh2, -1, 4);
 		int imSize=header->width*header->height;
-		short *dst=new short[imSize];
+		short *dst=nullptr;
+		bool is_float=false;
 		if(header->version==1)
 		{
+			dst=(short*)malloc(imSize*sizeof(short));
 			auto hData=(HuffDataHeader*)(header->histogram+header->nLevels);
 			if(*(int*)hData->DATA!=('D'|'A'<<8|'T'<<16|'A'<<24))
 			{
@@ -1495,7 +2141,7 @@ namespace		huff
 				console_pause();
 				console_end();
 #endif
-				delete[] dst;
+				free(dst);
 				return false;
 			}
 
@@ -1566,7 +2212,7 @@ namespace		huff
 			int bit_idx=0, kd=0;//naive 1bit decode
 			for(;kd<imSize&&bit_idx<hData->cBitSize;++kd)
 			{
-				int prev=tree.size()-1, node=prev;
+				int prev=(int)tree.size()-1, node=prev;
 				while(bit_idx<hData->cBitSize&&(tree[node].branch[0]!=-1||tree[node].branch[1]!=-1))
 				{
 					int ex_idx=bit_idx>>5, in_idx=bit_idx&31;
@@ -1592,6 +2238,7 @@ namespace		huff
 		}
 		else if(header->version==2||header->version==3||header->version==4)//encoded with palette
 		{
+			dst=(short*)malloc(imSize*sizeof(short));
 			auto hData=(HuffDataHeader const*)(header->histogram+header->nLevels);
 			int *bits=(int*)hData->data;
 			int bitidx=0;
@@ -1667,6 +2314,7 @@ namespace		huff
 		}
 		else if(header->version==5)//RVL
 		{
+			dst=(short*)malloc(imSize*sizeof(short));
 			int *bits=(int*)header->histogram;
 			int bitidx=0;
 			short *d2=nullptr;
@@ -1725,8 +2373,17 @@ namespace		huff
 				time_mark("cleanup");
 			}
 		}
+		else if(header->version==7)//ACC-ANS
+		{
+			is_float=true;
+			dst=(short*)malloc(imSize*4*sizeof(float));//sic
+			auto src=(byte*)header->histogram;
+			unsigned long long src_idx=0, src_size=bytesize-sizeof(HuffHeader);
+			rans4_decode(src, src_idx, src_size, dst, imSize, 4*sizeof(float), false);
+		}
 		else if(header->version==10)//uncompressed raw10
 		{
+			dst=(short*)malloc(imSize*sizeof(short));
 			auto buf=(byte*)header->histogram;
 			for(int kd=0, ks=0;kd<imSize&&(int)sizeof(HuffHeader)+ks<bytesize;kd+=4, ks+=5)
 			{
@@ -1739,6 +2396,7 @@ namespace		huff
 		}
 		else if(header->version==12)//uncompressed raw12
 		{
+			dst=(short*)malloc(imSize*sizeof(short));
 			auto buf=(byte*)header->histogram;
 			for(int kd=0, ks=0;kd<imSize&&(int)sizeof(HuffHeader)+ks<bytesize;kd+=2, ks+=3)
 			{
@@ -1749,6 +2407,7 @@ namespace		huff
 		}
 		else if(header->version==14)//uncompressed raw14
 		{
+			dst=(short*)malloc(imSize*sizeof(short));
 			auto buf=(byte*)header->histogram;
 			for(int kd=0, ks=0;kd<imSize&&(int)sizeof(HuffHeader)+ks<bytesize;kd+=4, ks+=7)
 			{
@@ -1762,24 +2421,61 @@ namespace		huff
 
 		//on success
 		void *b2=nullptr;
+		bw=header->width, bh=header->height, depth=floor_log2(header->nLevels);
 		switch(format)
 		{
 		case RF_I8_RGBA:
-			b2=realloc(*pbuffer, imSize<<2);
-			if(b2)
-				*pbuffer=b2;
-			console_start_good();
-			print("Decoding raw straight to RGBA is not supported yet."), print_flush();
-			console_pause();
-			console_end();
+			if(is_float)
+			{
+				//TODO: convert interleaved float Bayer to RGBA8
+			}
+			else
+			{
+				b2=realloc(*pbuffer, imSize<<2);
+				if(b2)
+					*pbuffer=b2;
+				console_start_good();
+				print("Decoding raw straight to RGBA is not supported yet."), print_flush();
+				console_pause();
+				console_end();
+			}
 			break;
 		case RF_I16_BAYER:
-			b2=realloc(*pbuffer, imSize<<1);
-			if(b2)
-				*pbuffer=b2;
-			memcpy(*pbuffer, dst, imSize<<1);
+			if(is_float)
+			{
+				//TODO: convert interleaved float Bayer to short Bayer
+			}
+			else
+			{
+				b2=realloc(*pbuffer, imSize<<1);
+				if(b2)
+					*pbuffer=b2;
+				memcpy(*pbuffer, dst, imSize<<1);
+			}
 			break;
 		case RF_F32_BAYER:
+			if(is_float)
+			{
+				int w0=bw;
+				bw<<=1, bh<<=1;
+				b2=realloc(*pbuffer, imSize*4*sizeof(float));
+				if(b2)
+					*pbuffer=b2;
+				auto src=(float*)dst;//sic
+				auto fbuf=(float*)*pbuffer;
+				for(int ky=0;ky<bh;ky+=2)
+				{
+					for(int kx=0;kx<bw;kx+=2)
+					{
+						int srcIdx=(w0*(ky>>1)+(kx>>1))<<2, dstIdx=bw*ky+kx;
+						fbuf[dstIdx]=src[srcIdx];
+						fbuf[dstIdx+1]=src[srcIdx+1];
+						fbuf[dstIdx+bw]=src[srcIdx+2];
+						fbuf[dstIdx+bw+1]=src[srcIdx+3];
+					}
+				}
+			}
+			else
 			{
 				float normal=1.f/(header->nLevels-1);
 				b2=realloc(*pbuffer, imSize<<2);
@@ -1791,9 +2487,9 @@ namespace		huff
 			}
 			break;
 		}
-		delete[] dst;
-		memcpy(bayer_sh, bayer_sh2, 4);
-		bw=header->width, bh=header->height, depth=floor_log2(header->nLevels);
+		free(dst);
+		if(bayer_sh)
+			memcpy(bayer_sh, bayer_sh2, 4);
 #ifdef DEBUG_ARCH
 		console_pause();
 		console_end();

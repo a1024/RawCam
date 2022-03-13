@@ -239,11 +239,11 @@ public class CameraFragment extends Fragment//https://www.youtube.com/playlist?l
 			//bitmap.compress(Bitmap.CompressFormat.PNG, 90, stream);
 			stream.flush();
 			stream.close();
-			surfaceView.setStatus(4000, "Saved "+bmpW+"x"+bmpH+" as "+filename);
+			surfaceView.setStatus(4000, "Saved "+bmpW+"x"+bmpH+" as "+filename+" "+(burstCount-savePreviewRemaining+1)+"/"+burstCount);
 		}
 		catch(IOException e)
 		{
-			error(546, e);
+			error(246, e);
 		}
 	}
 	CameraDevice cameraDevice;
@@ -268,15 +268,17 @@ public class CameraFragment extends Fragment//https://www.youtube.com/playlist?l
 		ImageSaver(ImageReader _reader){reader=_reader;}
 	//	final Image image;
 	//	ImageSaver(Image _image){image=_image;}
-		void printSuccess(){displayToast(false, "Saved "+filename);}
-		void printFailure(){displayToast(true, "Failed to save "+filename);}
 		@Override public void run()
 		{
 			synchronized(mutex)
 			{
 				Image image=reader.acquireLatestImage();
-				createMediaFilename(MediaType.IMAGE);
 				int format=image.getFormat();
+				boolean need2save=
+					!((format==ImageFormat.RAW10||android.os.Build.VERSION.SDK_INT>=android.os.Build.VERSION_CODES.M&&format==ImageFormat.RAW12)
+					&&(selectedImFormat==FORMAT_STACK_F32||selectedImFormat==FORMAT_STACK_F32_RED)&&frameId>1);
+				if(need2save)
+					createMediaFilename(MediaType.IMAGE);
 				ByteBuffer buffer;
 				String result=null;
 				switch(format)
@@ -332,53 +334,42 @@ public class CameraFragment extends Fragment//https://www.youtube.com/playlist?l
 						case FORMAT_GRAY_RVL_DENOISE://20210429
 							data=compressAPI2(bits, iw, ih, depth, 1, 5);
 							break;
+						case FORMAT_STACK_F32://20220313
+							surfaceView.setStatus(2000, "Burst #"+burstCount+", frame #"+frameId+"/"+burstCount);
+							data=compressAPI2(bits, iw, ih, depth, bayer, frameId>1?6:7);
+							break;
+						case FORMAT_STACK_F32_RED://20220313
+							surfaceView.setStatus(2000, "Burst #"+burstCount+", frame #"+frameId+"/"+burstCount);
+							data=compressAPI2(bits, iw, ih, depth, bayer, frameId>1?8:9);
+							break;
 						}
-
-					/*	switch(selectedImFormat)
+						if(need2save)
 						{
-						case FORMAT_RAW_HUFF_V1:
-							data=compress(bits, iw, ih, depth, bayer);
-							break;
-						case FORMAT_RAW_HUFF_RVL://TODO 20210429
-							break;
-						case FORMAT_RAW_UNC:
-							data=pack_raw(bits, iw, ih, depth, bayer);
-							break;
-						case FORMAT_GRAY_UNC:
-							if(supportsRaw12)
-								data=pack_r12g14(bits, iw, ih, 0);
+							if(data!=null)
+								result=imageSaver2.saveBinary(filename, data);
+							if(result!=null)
+								surfaceView.setStatus(2000, "Saved "+result);
+							//else if(selectedImFormat==FORMAT_STACK_F32&&frameId>1)
+							//	surfaceView.setStatus(2000, "Stacking "+(burstCount-frameId)+"/"+burstCount);
 							else
-								data=pack_r10g12(bits, iw, ih, 0);
-							break;
-						case FORMAT_GRAY_UNC_DENOISE:
-							if(supportsRaw12)
-								data=pack_r12g14(bits, iw, ih, 1);
-							else
-								data=pack_r10g12(bits, iw, ih, 1);
-							break;
-						case FORMAT_GRAY_RVL_DENOISE://TODO 20210429
-							break;
-						}//*/
-						if(data!=null)
-							result=imageSaver2.saveBinary(filename, data);
-						if(result!=null)
-							surfaceView.setStatus(2000, "Saved "+result);
-						else
-							surfaceView.setStatus(2000, "Failed to save "+ImageSaver2.getName(filename));
+								surfaceView.setStatus(2000, "Failed to save "+ImageSaver2.getName(filename));
+						}
 					}
 					break;
 				}
 				image.close();
+				--frameId;
 			}
 		}
 	}
+	ImageSaver currentSaver;
 	CameraCaptureSession previewCaptureSession, recordCaptureSession;
 	CameraCaptureSession.CaptureCallback stillCaptureCallback=new CameraCaptureSession.CaptureCallback()
 	{
 		@Override public void onCaptureStarted(@NonNull CameraCaptureSession session, @NonNull CaptureRequest request, long timestamp, long frameNumber)
 		{
 			super.onCaptureStarted(session, request, timestamp, frameNumber);
-			//createMediaFilename(MediaType.IMAGE);
+			createMediaFilename(MediaType.IMAGE);//mark 20220220
 		}
 	};
 	CameraCaptureSession.CaptureCallback focusCallback=new CameraCaptureSession.CaptureCallback()
@@ -431,7 +422,7 @@ public class CameraFragment extends Fragment//https://www.youtube.com/playlist?l
 					}
 					catch(CameraAccessException e)
 					{
-						error(304, e);
+						error(415, e);
 					}
 				}
 			}
@@ -452,7 +443,7 @@ public class CameraFragment extends Fragment//https://www.youtube.com/playlist?l
 			super.onCaptureCompleted(session, request, result);
 			--burstRemaining;
 			loge("Burst frame: "+(burstCount-burstRemaining)+"/"+burstCount);
-			//createMediaFilename(MediaType.IMAGE);
+			createMediaFilename(MediaType.IMAGE);//mark 20220220
 			if(burstRemaining==0)
 				startPreview();
 		}
@@ -543,7 +534,7 @@ public class CameraFragment extends Fragment//https://www.youtube.com/playlist?l
 				@Override public void onCaptureFailed(CameraCaptureSession session, CaptureRequest request, CaptureFailure failure)
 				{
 					super.onCaptureFailed(session, request, failure);
-					error(357, "Manual AF failure: " + failure);
+					error(527, "Manual AF failure: " + failure);
 					//Log.e(TAG, "Manual AF failure: " + failure);
 					manualFocusEngaged=false;
 				}
@@ -648,7 +639,7 @@ public class CameraFragment extends Fragment//https://www.youtube.com/playlist?l
 		{
 			boolean success=folder.mkdirs();
 			if(!success)
-				error(400, "Failed to create folder \'DCIM/Raw\'");
+				error(632, "Failed to create folder \'DCIM/Raw\'");
 		}
 
 		DisplayMetrics displayMetrics=new DisplayMetrics();
@@ -713,6 +704,7 @@ public class CameraFragment extends Fragment//https://www.youtube.com/playlist?l
 				case FORMAT_GRAY_UNC://20210423
 				case FORMAT_GRAY_UNC_DENOISE://20210424
 				case FORMAT_GRAY_RVL_DENOISE:
+				case FORMAT_STACK_F32://20220313
 					surfaceView.setStatus(4000, "Burst of "+burstCount+" begins in 4 seconds...");
 					new Handler().postDelayed(()->
 					{
@@ -723,6 +715,7 @@ public class CameraFragment extends Fragment//https://www.youtube.com/playlist?l
 							for(int k=0;k<burstCount;++k)
 								captureList.add(requestBuilder.build());
 							burstRemaining=burstCount;
+							frameId=burstCount;
 
 							previewCaptureSession.stopRepeating();
 							previewCaptureSession.captureBurst(captureList, burstCaptureCallback, null);
@@ -730,7 +723,7 @@ public class CameraFragment extends Fragment//https://www.youtube.com/playlist?l
 						}
 						catch(CameraAccessException e)
 						{
-							error(650, e);
+							error(719, e);
 						}
 					}, 4000);
 					return;
@@ -770,7 +763,7 @@ public class CameraFragment extends Fragment//https://www.youtube.com/playlist?l
 			if(selectedImFormat==FORMAT_RAW_PREVIEW_JPEG)
 			{
 				savePreviewRemaining=1;
-				//savePreview();
+				savePreview();//mark 20220220_2
 				return;
 			}
 			waitingForLock=true;
@@ -784,7 +777,7 @@ public class CameraFragment extends Fragment//https://www.youtube.com/playlist?l
 			}
 			catch(CameraAccessException e)
 			{
-				error(491, e);
+				error(773, e);
 			}
 		});
 
@@ -879,6 +872,7 @@ public class CameraFragment extends Fragment//https://www.youtube.com/playlist?l
 				case FORMAT_GRAY_UNC:
 				case FORMAT_GRAY_UNC_DENOISE:
 				case FORMAT_GRAY_RVL_DENOISE:
+				case FORMAT_STACK_F32:
 					burstSpinner.setVisibility(View.VISIBLE);
 					break;
 				}
@@ -887,28 +881,6 @@ public class CameraFragment extends Fragment//https://www.youtube.com/playlist?l
 				//else
 				//	burstSpinner.setVisibility(View.INVISIBLE);
 				surfaceView.invalidate();
-			/*	switch(position)
-				{
-				case 0://jpeg
-					selectedImFormat=ImageFormat.JPEG;
-					manualSwitch.setVisibility(View.VISIBLE);//
-					break;
-				case 1://raw
-				case 2://raw preview		//raw+jpeg
-					selectedImFormat=ImageFormat.RAW_SENSOR;
-					manualSwitch.setVisibility(View.INVISIBLE);//won't capture raw in manual mode
-					break;
-				case 3://saved as TIFF
-					selectedImFormat=ImageFormat.RAW10;
-					manualSwitch.setVisibility(View.INVISIBLE);//
-					break;
-				}
-				rawSavePreview=position==3;
-				//rawPlusJPEG=position==3;
-				if(selectedImFormat==ImageFormat.JPEG)
-					jpgQualitySpinner.setVisibility(View.VISIBLE);
-				else
-					jpgQualitySpinner.setVisibility(View.INVISIBLE);//*/
 				populateImResSpinner();
 
 				changeImRes();
@@ -1130,7 +1102,7 @@ public class CameraFragment extends Fragment//https://www.youtube.com/playlist?l
 				}
 				catch(CameraAccessException e)
 				{
-					error(749, e);
+					error(1098, e);
 				}
 				if(focusSupported)
 				{
@@ -1294,7 +1266,7 @@ public class CameraFragment extends Fragment//https://www.youtube.com/playlist?l
 		}
 		catch(CameraAccessException e)
 		{
-			error(850, e);
+			error(1262, e);
 		}
 	}
 	void releaseSettings()
@@ -1315,7 +1287,7 @@ public class CameraFragment extends Fragment//https://www.youtube.com/playlist?l
 		}
 		catch(CameraAccessException e)
 		{
-			error(864, e);
+			error(1283, e);
 		}
 	}
 	void hideManualUI()
@@ -1349,15 +1321,18 @@ public class CameraFragment extends Fragment//https://www.youtube.com/playlist?l
 		FORMAT_RAW_UNC=5,//uncompressed raw10/raw12
 		FORMAT_GRAY_UNC=6,//uncompressed raw10/raw12, produces quarter-area +2 depth grayscale
 		FORMAT_GRAY_UNC_DENOISE=7,
-		FORMAT_GRAY_RVL_DENOISE=8;
-	//static final int FORMAT_JPEG=0, FORMAT_DNG=1, FORMAT_RAW_PREVIEW_JPEG=2, FORMAT_RAW10_TIFF=3, FORMAT_RAW12_TIFF=4;
+		FORMAT_GRAY_RVL_DENOISE=8,
+		FORMAT_STACK_F32=9,
+		FORMAT_STACK_F32_RED=10;
 	int selectedQuality=75;
 	SparseIntArray imFormats=new SparseIntArray();
 	int selectedImFormat=FORMAT_JPEG;
 	//boolean rawSavePreview=false;
-	int[] burstCounts=new int[]{20, 50, 100, 200, 500, 1000, 2000};
-	int savePreviewRemaining=0, burstRemaining=0, burstCount=20;
-	//boolean rawPlusJPEG=false;
+	int[] burstCounts=new int[]{2, 5, 20, 50, 100, 200, 500, 1000, 2000};
+	int savePreviewRemaining=0,
+		burstRemaining=0,
+		frameId=0,
+		burstCount=burstCounts[0];
 	int clampIdx(int idx, int size)
 	{
 		if(idx>=size)
@@ -1371,7 +1346,7 @@ public class CameraFragment extends Fragment//https://www.youtube.com/playlist?l
 		int count=camIds.size();
 		if(count==0)
 		{
-			error(894, "camIds is empty");
+			error(1339, "camIds is empty");
 			return "0";
 		}
 		selectedCam=clampIdx(selectedCam, count);
@@ -1382,7 +1357,7 @@ public class CameraFragment extends Fragment//https://www.youtube.com/playlist?l
 		int count=camIds.size();
 		if(count==0)
 		{
-			error(894, "camIds is empty");
+			error(1350, "camIds is empty");
 			return "0";
 		}
 		selectedCam=clampIdx(selectedCam, count);
@@ -1392,7 +1367,7 @@ public class CameraFragment extends Fragment//https://www.youtube.com/playlist?l
 	{
 		int count=imResList.size();
 		if(count==0)
-			error(904, "imResList is empty");
+			error(1360, "imResList is empty");
 		selectedImRes=clampIdx(selectedImRes, count);
 		return imResList.get(selectedImRes);
 	}
@@ -1413,28 +1388,19 @@ public class CameraFragment extends Fragment//https://www.youtube.com/playlist?l
 		case FORMAT_GRAY_UNC:
 		case FORMAT_GRAY_UNC_DENOISE:
 		case FORMAT_GRAY_RVL_DENOISE:
+		case FORMAT_STACK_F32:
+		case FORMAT_STACK_F32_RED:
 			if(supportsRaw12&&Build.VERSION.SDK_INT>=Build.VERSION_CODES.M)
 				return ImageFormat.RAW12;
 			return ImageFormat.RAW10;
 		}
-	/*	switch(selectedImFormat)
-		{
-		case FORMAT_JPEG:return ImageFormat.JPEG;
-		case FORMAT_DNG:
-		case FORMAT_RAW_PREVIEW_JPEG:return ImageFormat.RAW_SENSOR;
-		case FORMAT_RAW10_TIFF:return ImageFormat.RAW10;
-		case FORMAT_RAW12_TIFF:
-			if(Build.VERSION.SDK_INT>=Build.VERSION_CODES.M)
-				return ImageFormat.RAW12;
-			return 0;
-		}//*/
 		return 0;
 	}
 	void setImRes()//uses selectedImRes & selectedImFormat
 	{
 		Size imageSize=getImRes();
 		imageReader=ImageReader.newInstance(imageSize.getWidth(), imageSize.getHeight(), getActualFormat(), 1);
-		imageReader.setOnImageAvailableListener(reader->bkHandler.post(new ImageSaver(reader)), bkHandler);
+		imageReader.setOnImageAvailableListener(reader->bkHandler.post(currentSaver=new ImageSaver(reader)), bkHandler);
 	}
 	void changeImRes()
 	{
@@ -1455,7 +1421,7 @@ public class CameraFragment extends Fragment//https://www.youtube.com/playlist?l
 			//	{
 			//	}
 			//}, bkHandler);
-			imageReader.setOnImageAvailableListener(reader->bkHandler.post(new ImageSaver(reader)), bkHandler);
+			imageReader.setOnImageAvailableListener(reader->bkHandler.post(currentSaver=new ImageSaver(reader)), bkHandler);
 			SurfaceTexture texture=textureView.getSurfaceTexture();
 			if(DEBUG)
 				displayToast(false, "Preview resolution: "+previewSize.getWidth()+"x"+previewSize.getHeight());//
@@ -1490,26 +1456,26 @@ public class CameraFragment extends Fragment//https://www.youtube.com/playlist?l
 					}
 					catch(CameraAccessException e)
 					{
-						error(953, e);
+						error(1448, e);
 					}
 				}
 				@Override public void onConfigureFailed(@NonNull CameraCaptureSession session)
 				{
-					error(958, "Unable to setup camera preview");
+					error(1453, "Unable to setup camera preview");
 					//displayToast(false, "Unable to setup camera preview");
 				}
 			}, null);
 		}
 		catch(CameraAccessException e)
 		{
-			error(965, e);
+			error(1460, e);
 		}
 	}
 	Size getVidRes()
 	{
 		int count=vidResList.size();
 		if(count==0)
-			error(1051, "vidResList is empty");
+			error(1467, "vidResList is empty");
 		selectedVidRes=clampIdx(selectedVidRes, count);
 		return vidResList.get(selectedVidRes);
 	}
@@ -1554,7 +1520,7 @@ public class CameraFragment extends Fragment//https://www.youtube.com/playlist?l
 		}
 		catch(CameraAccessException e)
 		{
-			error(1096, e);
+			error(1512, e);
 		}
 	}
 	void rotatePreview(int width, int height, int angle)
@@ -1765,7 +1731,7 @@ public class CameraFragment extends Fragment//https://www.youtube.com/playlist?l
 					case PixelFormat.TRANSPARENT:		str="PixelFormat.TRANSPARENT";break;
 				//	case PixelFormat.UNKNOWN:			str="PixelFormat.UNKNOWN";break;
 					}
-					surfaceView.setStatus(4000, str);
+					surfaceView.setStatus(8000, str);
 				}
 			}//end if !resume
 
@@ -1828,6 +1794,8 @@ public class CameraFragment extends Fragment//https://www.youtube.com/playlist?l
 						adapter.add("GRAY14 .HUF UNC");	imFormats.append(formatCount, FORMAT_GRAY_UNC);	++formatCount;
 						adapter.add("GRAY14 .HUF UNC DENOISE");imFormats.append(formatCount, FORMAT_GRAY_UNC_DENOISE);	++formatCount;
 						adapter.add("GRAY14 .HUF RVL DENOISE");imFormats.append(formatCount, FORMAT_GRAY_RVL_DENOISE);	++formatCount;
+						adapter.add("RAW12 STACK F32");	imFormats.append(formatCount, FORMAT_STACK_F32);	++formatCount;
+						adapter.add("RAW12 RED F32");	imFormats.append(formatCount, FORMAT_STACK_F32_RED);	++formatCount;
 					}
 					else if(supportsRaw10)
 					{
@@ -1837,6 +1805,8 @@ public class CameraFragment extends Fragment//https://www.youtube.com/playlist?l
 						adapter.add("GRAY12 .HUF UNC");	imFormats.append(formatCount, FORMAT_GRAY_UNC);	++formatCount;
 						adapter.add("GRAY12 .HUF UNC DENOISE");imFormats.append(formatCount, FORMAT_GRAY_UNC_DENOISE);	++formatCount;
 						adapter.add("GRAY12 .HUF RVL DENOISE");imFormats.append(formatCount, FORMAT_GRAY_RVL_DENOISE);	++formatCount;
+						adapter.add("RAW10 STACK F32");	imFormats.append(formatCount, FORMAT_STACK_F32);	++formatCount;
+						adapter.add("RAW10 RED F32");	imFormats.append(formatCount, FORMAT_STACK_F32_RED);	++formatCount;
 					}
 				}
 				imFormatSpinner.setAdapter(adapter);
@@ -1852,7 +1822,7 @@ public class CameraFragment extends Fragment//https://www.youtube.com/playlist?l
 		}
 		catch(CameraAccessException e)
 		{
-			error(1202, e);
+			error(1812, e);
 		}
 	}
 	void connectCamera()
@@ -1896,7 +1866,7 @@ public class CameraFragment extends Fragment//https://www.youtube.com/playlist?l
 		}
 		catch(CameraAccessException e)
 		{
-			error(1246, e);
+			error(1856, e);
 		}
 	}
 	void closeCamera()
@@ -1967,18 +1937,18 @@ public class CameraFragment extends Fragment//https://www.youtube.com/playlist?l
 					}
 					catch(CameraAccessException e)
 					{
-						error(1306, e);
+						error(1927, e);
 					}
 				}
 				@Override public void onConfigureFailed(@NonNull CameraCaptureSession session)
 				{
-					error(1311, "Unable to setup camera preview");
+					error(1932, "Unable to setup camera preview");
 				}
 			}, null);
 		}
 		catch(CameraAccessException e)
 		{
-			error(1318, e);
+			error(1938, e);
 		}
 	}
 	void startBkThread()
@@ -1998,7 +1968,7 @@ public class CameraFragment extends Fragment//https://www.youtube.com/playlist?l
 		}
 		catch(InterruptedException e)
 		{
-			error(1338, e);
+			error(1958, e);
 		}
 	}
 
@@ -2025,6 +1995,7 @@ public class CameraFragment extends Fragment//https://www.youtube.com/playlist?l
 				break;
 			case FORMAT_RAW_HUFF_V1:case FORMAT_RAW_HUFF_RVL:
 			case FORMAT_RAW_UNC:case FORMAT_GRAY_UNC:case FORMAT_GRAY_UNC_DENOISE:case FORMAT_GRAY_RVL_DENOISE:
+			case FORMAT_STACK_F32:case FORMAT_STACK_F32_RED:
 				extension=".huf";
 				break;
 			}
@@ -2036,7 +2007,10 @@ public class CameraFragment extends Fragment//https://www.youtube.com/playlist?l
 		File file=new File(folder, timestamp+extension);//TODO: don't create temp file
 		//File file=File.createTempFile(timestamp, extension, folder);
 		filename=file.getAbsolutePath();
-		displayToast(false, "Saving "+filename);//
+		if(burstRemaining>0)
+			displayToast(false, "Saving "+filename+" "+(burstCount-burstRemaining)+"/"+burstCount);//
+		else
+			displayToast(false, "Saving "+filename);//
 		return file;
 	}
 
@@ -2095,7 +2069,7 @@ public class CameraFragment extends Fragment//https://www.youtube.com/playlist?l
 					}
 					catch(CameraAccessException e)
 					{
-						error(1418, e);
+						error(2059, e);
 					}
 				}
 				@Override public void onConfigureFailed(@NonNull CameraCaptureSession session){}
@@ -2103,7 +2077,7 @@ public class CameraFragment extends Fragment//https://www.youtube.com/playlist?l
 		}
 		catch(IOException|CameraAccessException e)
 		{
-			error(1426, e);
+			error(2067, e);
 		}
 	}
 }

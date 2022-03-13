@@ -1,9 +1,27 @@
+//huff.h - declarations for .huff codec used by RawCam Android app
+//Copyright (C) 2022  Ayman Wagih Mohsen
+//
+//This program is free software: you can redistribute it and/or modify
+//it under the terms of the GNU General Public License as published by
+//the Free Software Foundation, either version 3 of the License, or
+//(at your option) any later version.
+//
+//This program is distributed in the hope that it will be useful,
+//but WITHOUT ANY WARRANTY; without even the implied warranty of
+//MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
+//GNU General Public License for more details.
+//
+//You should have received a copy of the GNU General Public License
+//along with this program.  If not, see <https://www.gnu.org/licenses/>.
+
+#pragma once
 #ifndef HUFF_H
 #define HUFF_H
 #include		<vector>
 
 
 	#define 	PROFILER
+
 
 #ifdef PROFILER
 #include		<time.h>
@@ -80,6 +98,7 @@ namespace		huff
 	int			pack_raw	(const byte *buffer, int bw, int bh, int depth, int bayer, std::vector<int> &data);//depth: 10 or 12
 	int			pack_r10_g12(const byte *buffer, int bw, int bh, int denoise, std::vector<int> &data);
 	int			pack_r12_g14(const byte *buffer, int bw, int bh, int denoise, std::vector<int> &data);
+	int			compress_v7(const float *buffer, int bw, int bh, int bayer, int depth, int nFrames, unsigned char *&dst, unsigned long long &dst_size, unsigned long long &dst_cap);
 	bool		decompress(const byte *data, int bytesize, RequestedFormat format, void **pbuffer, int &bw, int &bh, int &depth, char *bayer_sh);//realloc will be used on buffer
 }
 #endif//HUFF_H

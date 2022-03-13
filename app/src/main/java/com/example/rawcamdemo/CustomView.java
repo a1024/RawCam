@@ -140,15 +140,19 @@ public class CustomView extends View//https://stackoverflow.com/questions/311734
 				else
 					str="GRAY12 .HUF RVL DENOISE";
 				break;
+			case CameraFragment.FORMAT_STACK_F32:
+				if(activity.supportsRaw12)
+					str="RAW12 STACK F32";
+				else
+					str="RAW10 STACK F32";
+				break;
+			case CameraFragment.FORMAT_STACK_F32_RED:
+				if(activity.supportsRaw12)
+					str="RAW12 RED F32";
+				else
+					str="RAW10 RED F32";
+				break;
 			}
-		/*	switch(activity.selectedImFormat)
-			{
-			case CameraFragment.FORMAT_JPEG:str="JPEG";break;
-			case CameraFragment.FORMAT_DNG:str="DNG";break;
-			case CameraFragment.FORMAT_RAW_PREVIEW_JPEG:str="PREVIEW RAW JPEG";break;
-			case CameraFragment.FORMAT_RAW10_TIFF:str="RAW10";break;
-			case CameraFragment.FORMAT_RAW12_TIFF:str="RAW12";break;
-			}//*/
 			canvas.drawText(str, 0, textSize2, paint);
 		}
 		++frameCount;
